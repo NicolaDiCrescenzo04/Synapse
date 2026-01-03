@@ -2,58 +2,25 @@
 //  ContentView.swift
 //  Synapse
 //
-//  Created by Nicola Di Crescenzo on 03/01/26.
+//  Vista principale dell'applicazione.
+//  Ospita la CanvasView per la mappa concettuale.
 //
 
 import SwiftUI
 import SwiftData
 
+/// Vista principale che contiene la canvas della mappa concettuale.
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
-
+    
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
-                    }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-            .toolbar {
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
-                    }
-                }
-            }
-        } detail: {
-            Text("Select an item")
-        }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
-            }
-        }
+        CanvasView()
+            .frame(minWidth: 800, minHeight: 600)
     }
 }
 
+// MARK: - Preview
+
 #Preview {
     ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
+        .modelContainer(for: [SynapseNode.self, SynapseConnection.self], inMemory: true)
 }

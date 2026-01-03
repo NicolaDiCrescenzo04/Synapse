@@ -10,16 +10,23 @@ import SwiftData
 
 @main
 struct SynapseApp: App {
+    
+    /// Container condiviso per la persistenza SwiftData.
+    /// Include i modelli SynapseNode e SynapseConnection.
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
+            SynapseNode.self,
+            SynapseConnection.self,
         ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: false
+        )
 
         do {
             return try ModelContainer(for: schema, configurations: [modelConfiguration])
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            fatalError("Errore nella creazione del ModelContainer: \(error)")
         }
     }()
 
