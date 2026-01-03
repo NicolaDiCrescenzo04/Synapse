@@ -66,6 +66,14 @@ class MapViewModel {
     /// Livello massimo di zoom (500%)
     static let maxZoom: CGFloat = 5.0
     
+    // MARK: - Stato Navigazione (Custom Pan)
+    
+    /// Offset corrente della telecamera (Pan)
+    var panOffset: CGPoint = .zero
+    
+    /// Posizione corrente del cursore del mouse (per Zoom to Cursor)
+    var currentCursorPosition: CGPoint?
+    
     // MARK: - Stato Linking (Shift+Drag)
     
     /// Indica se l'utente sta creando una connessione
@@ -305,8 +313,15 @@ class MapViewModel {
         modelContext.insert(node)
         nodes.append(node)
         
-        // Seleziona automaticamente il nuovo nodo per editing
+        // Seleziona automaticamente il nuovo nodo
         selectNode(node)
+        
+        // Imposta il flag per attivare l'editing con delay
+        // (permette alla UI di renderizzare il nodo prima di attivare il focus)
+        let nodeID = node.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            self.nodeToEditID = nodeID
+        }
         
         return node
     }
@@ -487,6 +502,70 @@ class MapViewModel {
     func deleteConnection(_ connection: SynapseConnection) {
         connections.removeAll { $0.id == connection.id }
         modelContext.delete(connection)
+    }
+    
+    // MARK: - Logica Zoom & Pan Avanzata
+    
+    /// Sensibilità dello zoom (0.0 - 1.0).
+    /// Valori bassi (es. 0.1-0.2) rendono lo zoom più lento. 1.0 è il massimo.
+    static let zoomSensitivity: CGFloat = 1.0
+    
+    // MARK: - Logica Zoom & Pan Avanzata
+    
+    /// Processa lo zoom mantenendo fissa la posizione sotto il cursore (Zoom to Cursor).
+    /// - Parameters:
+    ///   - delta: Il fattore di scala del gesto (es. 1.01 per ingrandire leggermente)
+    ///   - anchor: Il punto nello spazio SCHERMO attorno al quale zoomare (tipicamente mouse position)
+    func processZoom(delta: CGFloat, anchor: CGPoint) {
+        // 1. Applica damping al delta per uno zoom più "pesante" e controllabile
+        let dampedDelta = 1.0 + (delta - 1.0) * MapViewModel.zoomSensitivity
+        
+        // 2. Calcola il nuovo fattore di zoom
+        let newZoom = zoomScale * dampedDelta
+        
+        // 3. Clampa il valore tra min e max
+        let clampedZoom = min(max(newZoom, MapViewModel.minZoom), MapViewModel.maxZoom)
+        
+        // 4. Se lo zoom non è cambiato (limiti o delta minimo), esci
+        guard abs(clampedZoom - zoomScale) > 0.0001 else { return }
+        
+        // 5. MATEMATICA "ZOOM TO CURSOR":
+        // Vogliamo che il punto 'anchor' (schermo) rimanga ancorato allo stesso punto del 'mondo'.
+        // Formula Trasformazione: Screen = (World * Zoom) + Pan
+        // Da cui: World = (Screen - Pan) / Zoom
+        
+        // Calcoliamo dove si trova l'anchor nel mondo prima dello zoom
+        let worldAnchor = CGPoint(
+            x: (anchor.x - panOffset.x) / zoomScale,
+            y: (anchor.y - panOffset.y) / zoomScale
+        )
+        
+        // Calcoliamo il nuovo PanOffset per mantenere il worldAnchor nello stesso ScreenAnchor
+        // Pan_new = ScreenAnchor - (WorldAnchor * Zoom_new)
+        let newPanOffset = CGPoint(
+            x: anchor.x - (worldAnchor.x * clampedZoom),
+            y: anchor.y - (worldAnchor.y * clampedZoom)
+        )
+        
+        // 6. Applica i cambiamenti
+        zoomScale = clampedZoom
+        panOffset = newPanOffset
+    }
+    
+    /// Effettua il pan della canvas usando delta separati (utile per TrackpadReader).
+    /// - Parameters:
+    ///   - deltaX: Spostamento orizzontale
+    ///   - deltaY: Spostamento verticale
+    func pan(deltaX: CGFloat, deltaY: CGFloat) {
+        panOffset.x += deltaX
+        panOffset.y += deltaY
+    }
+    
+    /// Effettua il pan della canvas.
+    /// - Parameter delta: Il vettore di spostamento in coordinate schermo
+    func pan(delta: CGPoint) {
+        panOffset.x += delta.x
+        panOffset.y += delta.y
     }
 }
 

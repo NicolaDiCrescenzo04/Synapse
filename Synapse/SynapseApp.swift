@@ -34,6 +34,7 @@ struct SynapseApp: App {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(.hiddenTitleBar)
         .modelContainer(sharedModelContainer)
     }
 }
