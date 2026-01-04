@@ -17,6 +17,7 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Vista per un singolo nodo della mappa concettuale.
 /// Supporta:
@@ -52,13 +53,16 @@ struct NodeView: View {
     
     // MARK: - Stato Locale
     
-    /// Testo locale per binding con TextField
+    /// Testo locale per binding
     @State private var localText: String = ""
+    
+    /// Dati rich text locali
+    @State private var localRichTextData: Data?
     
     /// Indica se siamo in modalità editing (doppio click)
     @State private var isEditing: Bool = false
     
-    /// Focus per la TextField
+    /// Focus per la TextField (non più usato con RichTextEditor, ma mantenuto per compatibilità logica se serve)
     @FocusState private var isTextFieldFocused: Bool
     
     /// Posizione iniziale per il calcolo del drag
@@ -91,35 +95,58 @@ struct NodeView: View {
                     y: isSelected ? 4 : 2
                 )
             
-            // Contenuto: Text (view mode) o TextField (edit mode)
+            // Contenuto
             if isEditing {
-                // EDIT MODE: TextField editabile multilinea
-                TextField("Nuovo nodo...", text: $localText, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.center)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(.primary)
-                    .lineLimit(1...10)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .focused($isTextFieldFocused)
-                    .onSubmit {
+                // EDIT MODE: RichTextEditor
+                RichTextEditor(
+                    data: $localRichTextData,
+                    plainText: $localText,
+                    isEditable: true,
+                    onCommit: {
                         finishEditing()
                     }
-                    .onChange(of: localText) { _, newValue in
-                        viewModel.updateNodeText(node, newText: newValue)
-                    }
+                )
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
             } else {
-                // VIEW MODE: Text statico
-                Text(localText.isEmpty ? "Nuovo nodo..." : localText)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(localText.isEmpty ? .secondary : .primary)
-                    .lineLimit(nil)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false) // Non intercetta click
+                // VIEW MODE
+                if let imageData = node.imageData, let nsImage = NSImage(data: imageData) {
+                    // MODO IMMAGINE
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(4)
+                        .allowsHitTesting(false)
+                } else if isLatex(localText) {
+                    // MODO LATEX
+                    LatexView(latex: extractLatex(from: localText))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                } else {
+                    // MODO TESTO (Rich o Plain)
+                    if localRichTextData != nil && !localText.isEmpty {
+                        // Se c'è rich text, usiamo l'editor in modalità read-only per rendering fedele
+                        RichTextEditor(
+                            data: $localRichTextData,
+                            plainText: $localText,
+                            isEditable: false
+                        )
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .allowsHitTesting(false)
+                    } else {
+                        // Fallback Text semplice (più leggero)
+                        Text(localText.isEmpty ? "Nuovo nodo..." : localText)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(localText.isEmpty ? .secondary : .primary)
+                            .lineLimit(nil)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .allowsHitTesting(false)
+                    }
+                }
             }
             
             // Maniglia di ridimensionamento (solo se selezionato)
@@ -127,35 +154,45 @@ struct NodeView: View {
                 resizeHandle
             }
         }
+        .overlay(alignment: .top) {
+            if isEditing {
+                TextFormattingToolbar()
+                    .offset(y: -45) // Posiziona sopra il nodo
+                    .transition(.opacity)
+            }
+        }
         .frame(
             width: max(SynapseNode.minWidth, node.width),
             height: max(SynapseNode.minHeight, node.height)
         )
         .position(node.position)
-        .gesture(combinedGesture)
-        // Click singolo: Seleziona
-        .onTapGesture(count: 1) {
-            handleSingleTap()
+        .applyIf(!isEditing) { view in
+            view.gesture(combinedGesture)
         }
-        // Doppio click: Entra in edit mode
-        .onTapGesture(count: 2) {
-            handleDoubleTap()
-        }
+        // Doppio click: Priorità alta per essere riconosciuto prima del singolo
+        .highPriorityGesture(
+            TapGesture(count: 2)
+                .onEnded {
+                    handleDoubleTap()
+                }
+        )
+        // Click singolo: Usa simultaneousGesture per rispondere immediatamente
+        .simultaneousGesture(
+            TapGesture(count: 1)
+                .onEnded {
+                    handleSingleTap()
+                }
+        )
         .contextMenu {
             nodeContextMenu
         }
         .onAppear {
             localText = node.text
+            localRichTextData = node.richTextData
         }
         // Sincronizza stato editing con ViewModel
         .onChange(of: isEditing) { _, newValue in
             viewModel.isEditingNode = newValue
-        }
-        // Quando perdiamo il focus, esci da edit mode
-        .onChange(of: isTextFieldFocused) { _, newValue in
-            if !newValue && isEditing {
-                finishEditing()
-            }
         }
         // Quando il nodo viene deselezionato, esci da edit mode
         .onChange(of: isSelected) { _, newValue in
@@ -236,10 +273,9 @@ struct NodeView: View {
         isEditing = true
         viewModel.isEditingNode = true
         
-        // Dopo un breve delay, attiva il focus sulla TextField
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            isTextFieldFocused = true
-            viewModel.clearNodeEditingFlag()
+        // FIX: Delay per evitare che il flag venga pulito prima che NodeView lo osservi
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak viewModel] in
+            viewModel?.clearNodeEditingFlag()
         }
     }
     
@@ -248,9 +284,9 @@ struct NodeView: View {
         guard isEditing else { return }
         
         isEditing = false
-        isTextFieldFocused = false
         viewModel.isEditingNode = false
-        viewModel.updateNodeText(node, newText: localText)
+        // Salviamo sia il rich text che il plain text
+        viewModel.updateNodeRichText(node, richTextData: localRichTextData, plainText: localText)
     }
     
     // MARK: - Context Menu
@@ -280,6 +316,14 @@ struct NodeView: View {
             Button("Giallo") { node.hexColor = "#FFF9C4" }
             Button("Viola") { node.hexColor = "#E1BEE7" }
             Button("Arancione") { node.hexColor = "#FFE0B2" }
+        }
+        
+        Divider()
+        
+        Button {
+            selectImage()
+        } label: {
+            Label("Aggiungi Immagine", systemImage: "photo")
         }
     }
     
@@ -381,6 +425,51 @@ struct NodeView: View {
         }
         return Color.black.opacity(0.15)
     }
+    
+    // MARK: - Helpers
+    
+    /// Rileva se il testo è una formula Latex (racchiuso tra $$ )
+    private func isLatex(_ text: String) -> Bool {
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("$$") &&
+               text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("$$")
+    }
+    
+    /// Estrae il contenuto Latex rimuovendo i delimitatori
+    /// EDUCATIONAL: La versione precedente usava removeFirst(2)/removeLast(2) che causa crash
+    /// se la stringa ha meno di 4 caratteri. Questa versione usa dropFirst/dropLast che sono sicuri
+    /// e restituiscono una Substring vuota invece di crashare.
+    private func extractLatex(from text: String) -> String {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // SAFETY: Verifichiamo che la stringa abbia almeno 4 caratteri ($$ all'inizio e alla fine)
+        guard clean.count >= 4 else { return clean }
+        // dropFirst/dropLast sono sicuri: non crashano mai, restituiscono Substring vuota se necessario
+        return String(clean.dropFirst(2).dropLast(2))
+    }
+    
+    /// Apre il pannello di selezione immagine
+    private func selectImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                do {
+                    let data = try Data(contentsOf: url)
+                    DispatchQueue.main.async {
+                        // Aggiorna il nodo con l'immagine
+                        node.imageData = data
+                        // Adatta dimensioni nodo se necessario (semplice resize)
+                        if node.width < 200 { node.width = 200 }
+                        if node.height < 200 { node.height = 200 }
+                    }
+                } catch {
+                    print("Errore caricamento immagine: \(error)")
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Color Extension per Hex
@@ -418,6 +507,21 @@ extension Color {
     }
 }
 
+// MARK: - View Extension per Modificatori Condizionali
 
-
-
+extension View {
+    /// Applica una trasformazione alla view solo se la condizione è vera.
+    /// Permette di applicare gesture e altri modificatori in modo condizionale.
+    /// - Parameters:
+    ///   - condition: La condizione da valutare
+    ///   - transform: La trasformazione da applicare se la condizione è vera
+    /// - Returns: La view trasformata o originale
+    @ViewBuilder
+    func applyIf<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
+    }
+}

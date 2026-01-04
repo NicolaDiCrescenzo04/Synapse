@@ -26,93 +26,110 @@ struct CanvasView: View {
     
     var body: some View {
         GeometryReader { geometry in
-            ZStack {
-                // 1. NATIVE SCROLL HANDLER (Bottom Layer)
-                // Deve essere interattivo per ricevere gli eventi scroll del trackpad.
-                TrackpadReader { dx, dy in
-                    viewModel?.pan(deltaX: dx, deltaY: dy)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                
-                // 2. GESTURE HANDLER LAYER (Fondo)
-                // Questo layer cattura drag (panning con click) e tap.
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                dragOffset = value.translation
+            // 1. TRACKPAD WRAPPER (Top Level)
+            // Avvolge tutto il contenuto per intercettare gli eventi scrollWheel del trackpad
+            TrackpadReader { dx, dy in
+                viewModel?.pan(deltaX: dx, deltaY: dy)
+            } content: {
+                ZStack {
+                    // 2. GESTURE HANDLER LAYER (Fondo)
+                    // Questo layer cattura drag (panning con click) e tap.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 10) // Minimo movimento per evitare conflitto con Tap
+                                .onChanged { value in
+                                    dragOffset = value.translation
+                                }
+                                .onEnded { value in
+                                    guard let vm = viewModel else { return }
+                                    vm.pan(delta: CGPoint(x: value.translation.width, y: value.translation.height))
+                                    dragOffset = .zero
+                                }
+                        )
+                        // DOUBLE TAP: Crea nodo
+                        .onTapGesture(count: 2) { location in
+                            if let vm = viewModel {
+                                let worldLocation = screenToWorld(location, vm: vm)
+                                createNode(at: worldLocation)
                             }
-                            .onEnded { value in
-                                guard let vm = viewModel else { return }
-                                vm.pan(delta: CGPoint(x: value.translation.width, y: value.translation.height))
-                                dragOffset = .zero
-                            }
-                    )
-                    // ZOOM HUD / DOUBLE TAP
-                    .onTapGesture(count: 2) { location in
-                        if let vm = viewModel {
-                            let worldLocation = screenToWorld(location, vm: vm)
-                            createNode(at: worldLocation)
+                        }
+                        // SINGLE TAP: Deseleziona e Focus Canvas
+                        .onTapGesture(count: 1) {
+                            viewModel?.deselectAll()
+                            isCanvasFocused = true // Recupera focus per permettere Delete
+                        }
+                    
+                    // 3. WORLD CONTENT (Mondo Virtuale)
+                    Group {
+                        ZStack(alignment: .topLeading) {
+                            connectionsLayer
+                            temporaryLinkLayer
+                            nodesLayer
                         }
                     }
-                    .onTapGesture(count: 1) {
-                        viewModel?.deselectAll()
-                    }
-                
-                // 3. WORLD CONTENT (Mondo Virtuale)
-                Group {
-                    ZStack(alignment: .topLeading) {
-                        connectionsLayer
-                        temporaryLinkLayer
-                        nodesLayer
+                    .scaleEffect(viewModel?.zoomScale ?? 1.0, anchor: .topLeading)
+                    .offset(x: (viewModel?.panOffset.x ?? 0) + dragOffset.width,
+                            y: (viewModel?.panOffset.y ?? 0) + dragOffset.height)
+                }
+                .focusable() // Rende la view capace di ricevere eventi tastiera
+                .focusEffectDisabled(true) // Nasconde il riquadro di focus (anello blu)
+                .focused($isCanvasFocused)
+                // GESTURE ZOOM (Pinch)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            guard let vm = viewModel else { return }
+                            let delta = value / lastMagnification
+                            lastMagnification = value
+                            
+                            let anchor = vm.currentCursorPosition ?? CGPoint(x: geometry.size.width/2, y: geometry.size.height/2)
+                            vm.processZoom(delta: delta, anchor: anchor)
+                        }
+                        .onEnded { _ in
+                            lastMagnification = 1.0
+                        }
+                )
+                // TRACKING MOUSE
+                .onContinuousHover { phase in
+                    guard let vm = viewModel else { return }
+                    switch phase {
+                    case .active(let location):
+                        vm.currentCursorPosition = location
+                    case .ended:
+                        vm.currentCursorPosition = nil
                     }
                 }
-                .scaleEffect(viewModel?.zoomScale ?? 1.0, anchor: .topLeading)
-                .offset(x: (viewModel?.panOffset.x ?? 0) + dragOffset.width,
-                        y: (viewModel?.panOffset.y ?? 0) + dragOffset.height)
-            }
-            // CONFIGURAZIONE CANVAS - Niente focus ring sulla canvas intera
-            .focusEffectDisabled(true)
-            // GESTURE ZOOM (Pinch)
-            .gesture(
-                MagnificationGesture()
-                    .onChanged { value in
-                        guard let vm = viewModel else { return }
-                        let delta = value / lastMagnification
-                        lastMagnification = value
-                        
-                        let anchor = vm.currentCursorPosition ?? CGPoint(x: geometry.size.width/2, y: geometry.size.height/2)
-                        vm.processZoom(delta: delta, anchor: anchor)
+                .onAppear {
+                    initializeViewModel()
+                    centerInitialMappa(geometry: geometry)
+                    // EDUCATIONAL: In SwiftUI struct views, non c'è rischio di retain cycle con @State/@FocusState
+                    // perché le struct non creano cicli di riferimento. Tuttavia, il delay async è comunque sicuro.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                         isCanvasFocused = true
                     }
-                    .onEnded { _ in
-                        lastMagnification = 1.0
-                    }
-            )
-            // TRACKING MOUSE
-            .onContinuousHover { phase in
-                guard let vm = viewModel else { return }
-                switch phase {
-                case .active(let location):
-                    vm.currentCursorPosition = location
-                case .ended:
-                    vm.currentCursorPosition = nil
                 }
-            }
-            .onAppear {
-                initializeViewModel()
-                centerInitialMappa(geometry: geometry)
-            }
-            // KEYBOARD
-            .onKeyPress(.delete) { handleDelete() }
-            .onKeyPress(.deleteForward) { handleDelete() }
-            .onDeleteCommand { handleDeleteCommand() }
-            .onKeyPress(.tab) { handleTab() }
-            .onKeyPress(.return) { handleReturn(geometry: geometry) }
-            .onKeyPress(.escape) {
-                viewModel?.deselectAll()
-                isCanvasFocused = true
-                return .handled
+                // KEYBOARD
+                .onKeyPress(.delete) { handleDelete() }
+                .onKeyPress(.deleteForward) { handleDelete() }
+                .onDeleteCommand { handleDeleteCommand() }
+                .onKeyPress(.tab) { handleTab() }
+                .onKeyPress(.return) { handleReturn(geometry: geometry) }
+                .onKeyPress(.escape) {
+                    viewModel?.deselectAll()
+                    isCanvasFocused = true
+                    return .handled
+                }
+                // Quando si esce dall'editing di un nodo, ripristina il focus sulla canvas
+                // Usando un delay minimo per permettere a SwiftUI di completare il ciclo di rendering
+                .onChange(of: viewModel?.isEditingNode) { oldValue, newValue in
+                    if oldValue == true && newValue == false {
+                        // FIX: Delay per permettere a SwiftUI di completare la transizione
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            isCanvasFocused = true
+                        }
+                    }
+                }
             }
         }
         .overlay(zoomHUD, alignment: .bottomLeading)

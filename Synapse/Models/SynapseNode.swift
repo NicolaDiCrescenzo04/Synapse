@@ -40,7 +40,16 @@ final class SynapseNode {
     
     /// Colore del nodo in formato esadecimale (es. "#FF5733")
     /// Opzionale per permettere styling futuro
+    /// Colore del nodo in formato esadecimale (es. "#FF5733")
+    /// Opzionale per permettere styling futuro
     var hexColor: String?
+
+    /// Dati dell'immagine incorporata (opzionale)
+    /// externalStorage suggerisce a SwiftData di salvare il blob su disco
+    @Attribute(.externalStorage) var imageData: Data?
+    
+    /// Dati del testo arricchito (RTF/NSAttributedString)
+    @Attribute(.externalStorage) var richTextData: Data?
     
     // MARK: - Costanti
     
@@ -99,7 +108,9 @@ final class SynapseNode {
     ///   - width: Larghezza del nodo (default: 140)
     ///   - height: Altezza del nodo (default: 70)
     ///   - hexColor: Colore opzionale in formato esadecimale
-    init(text: String = "", x: Double, y: Double, width: Double = SynapseNode.defaultWidth, height: Double = SynapseNode.defaultHeight, hexColor: String? = nil) {
+    ///   - imageData: Dati immagine opzionali
+    ///   - richTextData: Dati rich text opzionali
+    init(text: String = "", x: Double, y: Double, width: Double = SynapseNode.defaultWidth, height: Double = SynapseNode.defaultHeight, hexColor: String? = nil, imageData: Data? = nil, richTextData: Data? = nil) {
         self.id = UUID()
         self.text = text
         self.x = x
@@ -107,6 +118,8 @@ final class SynapseNode {
         self.width = width
         self.height = height
         self.hexColor = hexColor
+        self.imageData = imageData
+        self.richTextData = richTextData
     }
     
     /// Crea un nuovo nodo usando un CGPoint per la posizione.
@@ -114,8 +127,8 @@ final class SynapseNode {
     ///   - text: Testo iniziale del nodo
     ///   - position: Posizione come CGPoint
     ///   - hexColor: Colore opzionale in formato esadecimale
-    convenience init(text: String = "", at position: CGPoint, hexColor: String? = nil) {
-        self.init(text: text, x: position.x, y: position.y, hexColor: hexColor)
+    convenience init(text: String = "", at position: CGPoint, hexColor: String? = nil, imageData: Data? = nil, richTextData: Data? = nil) {
+        self.init(text: text, x: position.x, y: position.y, hexColor: hexColor, imageData: imageData, richTextData: richTextData)
     }
 }
 

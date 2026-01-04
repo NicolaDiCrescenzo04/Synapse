@@ -316,11 +316,16 @@ class MapViewModel {
         // Seleziona automaticamente il nuovo nodo
         selectNode(node)
         
-        // Imposta il flag per attivare l'editing con delay
+        // Imposta il flag per attivare l'editing
         // (permette alla UI di renderizzare il nodo prima di attivare il focus)
         let nodeID = node.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.nodeToEditID = nodeID
+        // EDUCATIONAL: Usiamo [weak self] per evitare un retain cycle.
+        // Senza [weak self], la closure cattura 'self' in modo forte, creando un ciclo
+        // di riferimento se la closure sopravvive alla view (es. se l'utente chiude
+        // la view prima che il blocco async venga eseguito).
+        // FIX: Delay di 100ms per permettere a SwiftUI di renderizzare il nuovo nodo
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.nodeToEditID = nodeID
         }
         
         return node
@@ -354,19 +359,23 @@ class MapViewModel {
         // Seleziona il nuovo nodo
         selectNode(newNode)
         
-        // Imposta il flag per attivare l'editing con delay
+        // Imposta il flag per attivare l'editing
         // (permette alla UI di renderizzare il nodo prima di attivare il focus)
         let nodeID = newNode.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.nodeToEditID = nodeID
+        // EDUCATIONAL: [weak self] previene memory leak se il ViewModel viene deallocato
+        // prima che il blocco async venga eseguito sul main thread.
+        // FIX: Delay di 100ms per permettere a SwiftUI di renderizzare il nuovo nodo
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.nodeToEditID = nodeID
         }
         
         return newNode
     }
     
     /// Crea un nuovo nodo FRATELLO vicino al nodo selezionato (tasto ENTER).
-    /// Il nuovo nodo viene posizionato sotto il nodo selezionato, senza connessione.
-    /// Attiva automaticamente l'editing del testo.
+    /// Se il nodo selezionato ha un genitore, il nuovo nodo viene collegato allo stesso genitore.
+    /// Altrimenti viene creato isolato.
+    /// La posizione viene calcolata per evitare sovrapposizioni.
     /// - Returns: Il nuovo nodo creato, o nil se nessun nodo è selezionato
     @discardableResult
     func createSiblingNode() -> SynapseNode? {
@@ -375,24 +384,60 @@ class MapViewModel {
             return nil
         }
         
-        // Calcola la posizione del nuovo nodo (sotto il source)
-        let newPosition = CGPoint(
-            x: sourceNode.position.x,
-            y: sourceNode.position.y + siblingNodeOffsetY
-        )
+        // 1. Identifica il genitore comune (il nodo che punta al sourceNode)
+        // Se ci sono più connessioni in entrata, prendiamo la prima come "genitore principale"
+        let parentNode = sourceNode.incomingConnections.first?.source
         
-        // Crea il nuovo nodo
+        // 2. Calcola posizione evitando sovrapposizioni
+        // Partiamo dalla posizione sotto il sourceNode
+        let startX = sourceNode.position.x
+        var checkY = sourceNode.position.y + siblingNodeOffsetY
+        
+        // Usiamo un raggio di collisione basato sulle dimensioni tipiche del nodo
+        // (Height 70, spaziatura 100 -> raggio 40-50 è sicuro, usiamo 80 per margine largo)
+        let avoidanceRadius: CGFloat = 80.0
+        
+        // Funzione locale per verificare collisioni
+        func positionIsOccupied(_ point: CGPoint) -> Bool {
+            for node in nodes {
+                // Ignoriamo noi stessi (non ancora creati) e il sourceNode
+                if node.id == sourceNode.id { continue }
+                
+                let dist = hypot(point.x - node.position.x, point.y - node.position.y)
+                if dist < avoidanceRadius {
+                    return true
+                }
+            }
+            return false
+        }
+        
+        // Cerca slot libero scorrendo verso il basso
+        var attempts = 0
+        while positionIsOccupied(CGPoint(x: startX, y: checkY)) && attempts < 50 {
+            checkY += siblingNodeOffsetY
+            attempts += 1
+        }
+        
+        let newPosition = CGPoint(x: startX, y: checkY)
+        
+        // 3. Crea il nuovo nodo
         let newNode = SynapseNode(text: "", at: newPosition)
         modelContext.insert(newNode)
         nodes.append(newNode)
         
-        // Seleziona il nuovo nodo (senza creare connessione)
+        // 4. Se esiste un genitore, crea la connessione (così diventano fratelli visuali E logici)
+        if let parent = parentNode {
+            _ = createConnection(from: parent, to: newNode, label: "")
+        }
+        
+        // 5. Seleziona il nuovo nodo e attiva editing
         selectNode(newNode)
         
-        // Imposta il flag per attivare l'editing con delay
         let nodeID = newNode.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.nodeToEditID = nodeID
+        // EDUCATIONAL: [weak self] è necessario nelle closure asincrone per evitare retain cycles.
+        // FIX: Delay di 100ms per permettere a SwiftUI di renderizzare il nuovo nodo
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.nodeToEditID = nodeID
         }
         
         return newNode
@@ -410,10 +455,12 @@ class MapViewModel {
         // Seleziona il nuovo nodo
         selectNode(newNode)
         
-        // Imposta il flag per attivare l'editing con delay
+        // Imposta il flag per attivare l'editing
         let nodeID = newNode.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            self.nodeToEditID = nodeID
+        // EDUCATIONAL: Sempre usare [weak self] in closures asincrone all'interno di classi.
+        // FIX: Delay di 100ms per permettere a SwiftUI di renderizzare il nuovo nodo
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.nodeToEditID = nodeID
         }
         
         return newNode
@@ -435,6 +482,16 @@ class MapViewModel {
     ///   - newText: Il nuovo testo
     func updateNodeText(_ node: SynapseNode, newText: String) {
         node.text = newText
+    }
+    
+    /// Aggiorna il testo ricco di un nodo (e la versione plain text).
+    /// - Parameters:
+    ///   - node: Il nodo da modificare
+    ///   - richTextData: I dati RTF/Attributed String
+    ///   - plainText: La versione semplice del testo (per search/preview)
+    func updateNodeRichText(_ node: SynapseNode, richTextData: Data?, plainText: String) {
+        node.richTextData = richTextData
+        node.text = plainText
     }
     
     /// Elimina un nodo e tutte le sue connessioni (cascade).

@@ -2,49 +2,63 @@
 //  TrackpadReader.swift
 //  Synapse
 //
-//  Componente dedicato per intercettare gli eventi scrollWheel del Trackpad
-//  su macOS, essenziali per il panning a due dita in SwiftUI.
+//  Componente dedicato per intercettare gli eventi scrollWheel del Trackpad.
+//  Agisce come un Container View che avvolge il contenuto SwiftUI.
+//  Gli eventi di scroll che non vengono gestiti dal contenuto (es. ScrollView)
+//  risalgono ("bubble up") fino a questo container, che li intercetta per il panning.
 //
 
 import SwiftUI
 import AppKit
 
-/// Una rappresentazione SwiftUI di una NSView trasparente che cattura lo scrolling.
-struct TrackpadReader: NSViewRepresentable {
+/// Una View wrapper che intercetta gli eventi di scroll del trackpad.
+struct TrackpadReader<Content: View>: NSViewRepresentable {
+    
+    /// Il contenuto SwiftUI da visualizzare all'interno
+    let content: Content
     
     /// Callback per comunicare i delta dello scroll (X, Y)
     var onScroll: (CGFloat, CGFloat) -> Void
     
-    func makeNSView(context: Context) -> TrackpadView {
-        let view = TrackpadView()
+    init(_ onScroll: @escaping (CGFloat, CGFloat) -> Void, @ViewBuilder content: () -> Content) {
+        self.onScroll = onScroll
+        self.content = content()
+    }
+    
+    func makeNSView(context: Context) -> TrackpadContainerView<Content> {
+        let view = TrackpadContainerView(rootView: content)
         view.onScroll = onScroll
         return view
     }
     
-    func updateNSView(_ nsView: TrackpadView, context: Context) {
+    func updateNSView(_ nsView: TrackpadContainerView<Content>, context: Context) {
+        nsView.rootView = content
         nsView.onScroll = onScroll
     }
     
-    /// NSView sottostante che gestisce gli eventi
-    class TrackpadView: NSView {
+    /// NSView container che ospita il contenuto SwiftUI e intercetta scrollWheel
+    class TrackpadContainerView<T: View>: NSHostingView<T> {
         
         var onScroll: ((CGFloat, CGFloat) -> Void)?
         
-        override var acceptsFirstResponder: Bool { true }
-        
         override func scrollWheel(with event: NSEvent) {
-            // Estraiamo i delta precisi per lo scrolling inerziale/pixel-based
-            // Moltiplichiamo per un fattore negativo per ottenere il "Natural Scrolling"
-            // (muovo le dita a sinistra -> il contenuto va a sinistra, quindi la "camera" va a sinistra)
-           
-            // Fattore di moltiplicazione per la sensibilità e direzione
+            // Estraiamo i delta precisi per lo scrolling
             // -1.5 offre un feeling "Natural" e veloce
-            let sensitivity: CGFloat = -1.5
+            // 1.5 inverte la direzione se la precedente era al contrario
+            let sensitivity: CGFloat = 1.5
             
-            if event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0 {
-                // Notifica il listener
-                onScroll?(event.scrollingDeltaX * sensitivity, event.scrollingDeltaY * sensitivity)
+            // Verifica che l'evento sia effettivamente uno scroll
+            if event.phase == .began || event.phase == .changed || event.momentumPhase == .began || event.momentumPhase == .changed || (event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0) {
+                
+                if event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0 {
+                    onScroll?(event.scrollingDeltaX * sensitivity, event.scrollingDeltaY * sensitivity)
+                }
+            } else {
+                super.scrollWheel(with: event)
             }
         }
+        
+        // Importante: Assicuriamo che la view accetti il first responder per gestire eventi
+        override var acceptsFirstResponder: Bool { true }
     }
 }
