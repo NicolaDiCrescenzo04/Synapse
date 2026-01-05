@@ -48,7 +48,7 @@ final class SynapseNode {
     /// externalStorage suggerisce a SwiftData di salvare il blob su disco
     @Attribute(.externalStorage) var imageData: Data?
     
-    /// Dati del testo arricchito (RTF/NSAttributedString)
+    /// Dati del testo formattato (RTF/NSAttributedString) per supportare stili misti
     @Attribute(.externalStorage) var richTextData: Data?
     
     // MARK: - Costanti

@@ -83,16 +83,18 @@ struct ConnectionView: View {
         if let sourceNode = connection.source,
            let targetNode = connection.target {
             
-            let sourceCenter = sourceNode.position
+            // Calcola il punto sorgente (parola o centro nodo)
+            let sourcePoint = calculateSourcePoint(for: sourceNode)
+            let sourceSize = getEffectiveSourceSize(for: sourceNode)
             let targetCenter = targetNode.position
             
-            // Edge-clipping: frecce partono dal bordo dei nodi
+            // Edge-clipping: frecce partono dal bordo dei nodi/parole
             let clippedPoints = calculateClippedPoints(
-                from: sourceCenter, sourceSize: sourceNode.size,
+                from: sourcePoint, sourceSize: sourceSize,
                 to: targetCenter, targetSize: targetNode.size
             )
             
-            let startPoint = clippedPoints.start
+            let startPoint = connection.isWordAnchored ? sourcePoint : clippedPoints.start
             let endPoint = clippedPoints.end
             
             let controlPoints = calculateControlPoints(from: startPoint, to: endPoint)
@@ -100,6 +102,19 @@ struct ConnectionView: View {
             let labelPosition = bezierMidpoint(from: startPoint, to: endPoint, control1: controlPoints.0, control2: controlPoints.1)
             
             Group {
+                // Sottolineatura della parola se ancorata
+                if connection.isWordAnchored, let range = connection.fromTextRange, let wordRect = calculateWordRect(for: range, in: sourceNode) {
+                    let underlineY = sourceNode.position.y - sourceNode.size.height/2 + wordRect.maxY
+                    let underlineXStart = sourceNode.position.x - sourceNode.size.width/2 + wordRect.minX
+                    let underlineXEnd = sourceNode.position.x - sourceNode.size.width/2 + wordRect.maxX
+                    
+                    Path { path in
+                        path.move(to: CGPoint(x: underlineXStart, y: underlineY))
+                        path.addLine(to: CGPoint(x: underlineXEnd, y: underlineY))
+                    }
+                    .stroke(lineColor, lineWidth: 1.5)
+                }
+                
                 // Linea curva Bézier - VISIBILE
                 curvePath
                     .stroke(lineColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
@@ -208,6 +223,130 @@ struct ConnectionView: View {
         }
         
         return (startPoint, endPoint)
+    }
+    
+    // MARK: - Word-Level Connection Helpers
+    
+    /// Calcola il punto sorgente della connessione
+    /// Se la connessione è ancorata a una parola, calcola la posizione della parola
+    private func calculateSourcePoint(for node: SynapseNode) -> CGPoint {
+        guard connection.isWordAnchored,
+              let range = connection.fromTextRange else {
+            return node.position
+        }
+        
+        // Calcola la posizione della parola partendo dal testo del nodo
+        if let wordRect = calculateWordRect(for: range, in: node) {
+            // Converti da coordinate locali del nodo a coordinate world
+            // La freccia parte dal BORDO INFERIORE CENTRALE (per la sottolineatura)
+            return CGPoint(
+                x: node.position.x - node.size.width/2 + wordRect.midX,
+                y: node.position.y - node.size.height/2 + wordRect.maxY
+            )
+        }
+        
+        // Fallback al centro del nodo
+        return node.position
+    }
+    
+    /// Restituisce la dimensione effettiva della sorgente per il clipping
+    /// Per word-anchored connections, restituisce la dimensione della parola
+    private func getEffectiveSourceSize(for node: SynapseNode) -> CGSize {
+        guard connection.isWordAnchored,
+              let range = connection.fromTextRange,
+              let wordRect = calculateWordRect(for: range, in: node) else {
+            return node.size
+        }
+        
+        // Per word-anchored connections, usa la dimensione della parola
+        return wordRect.size
+    }
+    
+    /// Calcola il rettangolo di una parola data dal range nel testo del nodo
+    /// Include safety check per range invalidi (quando il testo è stato modificato)
+    /// - Returns: Il CGRect della parola in coordinate locali del nodo, o nil se non calcolabile
+    private func calculateWordRect(for range: NSRange, in node: SynapseNode) -> CGRect? {
+        // SAFETY CHECK: Verifica che il range sia valido per il testo corrente
+        let textLength = (node.text as NSString).length
+        guard range.location >= 0,
+              range.length > 0,
+              range.location + range.length <= textLength else {
+            // Range invalido - il testo è stato modificato dopo la creazione della connessione
+            return nil
+        }
+        
+        // Crea un layout temporaneo per calcolare la posizione della parola
+        let text: NSAttributedString
+        if let richData = node.richTextData,
+           let attributedString = try? NSAttributedString(
+               data: richData,
+               options: [.documentType: NSAttributedString.DocumentType.rtfd],
+               documentAttributes: nil
+           ) {
+            text = attributedString
+        } else {
+            text = NSAttributedString(string: node.text, attributes: [
+                .font: NSFont.systemFont(ofSize: 14) // Allinea con RichTextEditor default
+            ])
+        }
+        
+        // Safety check aggiuntivo
+        guard range.location + range.length <= text.length else {
+            return nil
+        }
+        
+        let layoutManager = NSLayoutManager()
+        // Larghezza disponibile per il testo (Node Width - Padding Orizzontale)
+        // horizontalPadding = 4, quindi total = 8
+        let availableWidth = max(1, node.width - 8)
+        let textContainer = NSTextContainer(size: CGSize(
+            width: availableWidth,
+            height: CGFloat.greatestFiniteMagnitude
+        ))
+        // Assicuriamoci che widthTracksTextView sia false qui perché stiamo definendo una larghezza fissa
+        textContainer.widthTracksTextView = false
+        
+        let textStorage = NSTextStorage(attributedString: text)
+        
+        textStorage.addLayoutManager(layoutManager)
+        layoutManager.addTextContainer(textContainer)
+        
+        // Forza il layout per calcoli corretti
+        layoutManager.ensureLayout(for: textContainer)
+        
+        // ---------------------------------------------------------
+        // CORREZIONE CENTERING VERTICALE (Mirroring FormattableTextView logic)
+        // ---------------------------------------------------------
+        
+        // Calcola altezza usata dal testo
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        let contentHeight = usedRect.height
+        
+        // Calcola altezza disponibile nel nodo (Node Height - Padding Verticale)
+        // verticalPadding = 2, quindi total = 4
+        let availableHeight = node.height - 4
+        
+        // Calcola offset Y per centering
+        var yOffset: CGFloat = 0
+        if contentHeight < availableHeight && contentHeight > 0 {
+            yOffset = floor((availableHeight - contentHeight) / 2.0)
+        }
+        
+        // ---------------------------------------------------------
+        
+        // Calcola il rettangolo del range
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        
+        // Mappa in coordinate del Nodo:
+        // X = rect.x + horizontalPadding (4)
+        // Y = rect.y + verticalPadding (2) + yOffset (Centering)
+        return CGRect(
+            x: rect.origin.x + 4,
+            y: rect.origin.y + 2 + yOffset,
+            width: rect.width,
+            height: rect.height
+        )
     }
     
     // MARK: - Curva Bézier

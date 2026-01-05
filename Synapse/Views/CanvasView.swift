@@ -136,12 +136,12 @@ struct CanvasView: View {
         // Toolbar di formattazione - appare quando un nodo è selezionato (non in editing)
         .overlay(alignment: .top) {
             if let vm = viewModel,
-               vm.selectedNodeID != nil,
-               !vm.isEditingNode {
+               vm.selectedNodeID != nil {
                 TextFormattingToolbar(
                     onBold: { vm.applyBoldToSelectedNode() },
                     onItalic: { vm.applyItalicToSelectedNode() },
-                    onUnderline: { vm.applyUnderlineToSelectedNode() }
+                    onUnderline: { vm.applyUnderlineToSelectedNode() },
+                    onRed: { vm.applyRedColorToSelectedNode() }
                 )
                 .padding(.top, 20)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -180,9 +180,30 @@ struct CanvasView: View {
     private var temporaryLinkLayer: some View {
         Group {
             if let vm = viewModel, vm.isLinking, let source = vm.tempLinkSource {
-                TemporaryConnectionLine(from: source.position, to: vm.tempDragPoint)
-                    .allowsHitTesting(false)
+                TemporaryConnectionLine(
+                    from: calculateTempLinkStartPoint(source: source, wordRect: vm.tempLinkWordRect),
+                    to: vm.tempDragPoint
+                )
+                .allowsHitTesting(false)
             }
+        }
+    }
+    
+    /// Calcola il punto di partenza per la linea temporanea durante il linking
+    /// - Parameters:
+    ///   - source: Nodo sorgente
+    ///   - wordRect: Rettangolo della parola (opzionale, per word-level linking)
+    /// - Returns: Punto di partenza in coordinate world
+    private func calculateTempLinkStartPoint(source: SynapseNode, wordRect: CGRect?) -> CGPoint {
+        if let wordRect = wordRect {
+            // Word-level: centro BASE della parola in coordinate world (per matchare sottolineatura)
+            return CGPoint(
+                x: source.position.x - source.size.width/2 + wordRect.midX,
+                y: source.position.y - source.size.height/2 + wordRect.maxY
+            )
+        } else {
+            // Node-level: centro del nodo
+            return source.position
         }
     }
     

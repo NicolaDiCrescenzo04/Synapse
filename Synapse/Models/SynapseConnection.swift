@@ -24,6 +24,26 @@ final class SynapseConnection {
     /// Descrive la natura della relazione tra i due nodi.
     var label: String
     
+    // MARK: - Word-Level Anchoring
+    
+    /// Posizione iniziale del range di testo sorgente (se la connessione parte da una parola)
+    /// Se nil, la connessione parte dal nodo intero
+    var fromRangeLocation: Int?
+    
+    /// Lunghezza del range di testo sorgente
+    var fromRangeLength: Int?
+    
+    /// Computed property per verificare se la connessione è ancorata a una parola
+    var isWordAnchored: Bool {
+        fromRangeLocation != nil && fromRangeLength != nil
+    }
+    
+    /// Computed property per ottenere l'NSRange (se presente)
+    var fromTextRange: NSRange? {
+        guard let loc = fromRangeLocation, let len = fromRangeLength else { return nil }
+        return NSRange(location: loc, length: len)
+    }
+    
     // MARK: - Relazioni
     
     /// Nodo di partenza della connessione.
@@ -41,10 +61,13 @@ final class SynapseConnection {
     ///   - source: Nodo di partenza
     ///   - target: Nodo di destinazione
     ///   - label: Etichetta che descrive la relazione (default: stringa vuota)
-    init(source: SynapseNode, target: SynapseNode, label: String = "") {
+    ///   - fromRange: Range opzionale del testo sorgente per word-level linking
+    init(source: SynapseNode, target: SynapseNode, label: String = "", fromRange: NSRange? = nil) {
         self.id = UUID()
         self.source = source
         self.target = target
         self.label = label
+        self.fromRangeLocation = fromRange?.location
+        self.fromRangeLength = fromRange?.length
     }
 }

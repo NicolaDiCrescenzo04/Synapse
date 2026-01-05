@@ -59,6 +59,10 @@ class MapViewModel {
         editingConnectionID != nil || focusedConnectionID != nil
     }
     
+    /// Riferimento debole alla NSTextView attualmente attiva (se in editing).
+    /// Permette alla toolbar di comunicare direttamente con l'editor.
+    weak var activeTextView: NSTextView?
+    
     // MARK: - Stato Zoom
     
     /// Livello di zoom attuale della canvas (1.0 = 100%)
@@ -88,6 +92,13 @@ class MapViewModel {
     
     /// Posizione corrente del mouse durante il drag di linking
     var tempDragPoint: CGPoint = .zero
+    
+    /// Range della parola sorgente durante word-level linking (opzionale)
+    /// Se nil, il linking parte dal nodo intero
+    var tempLinkWordRange: NSRange?
+    
+    /// Rettangolo della parola sorgente in coordinate locali del nodo (opzionale)
+    var tempLinkWordRect: CGRect?
     
     /// ID della connessione che deve ricevere il focus per l'editing dell'etichetta
     /// Usato sia dopo la creazione che per editing successivo
@@ -225,11 +236,29 @@ class MapViewModel {
     
     /// Inizia il processo di linking da un nodo sorgente.
     /// Chiamato quando l'utente inizia un Shift+Drag su un nodo.
-    /// - Parameter source: Il nodo di partenza
-    func startLinking(from source: SynapseNode) {
+    /// - Parameters:
+    ///   - source: Il nodo di partenza
+    ///   - wordRange: Range opzionale della parola nel testo (per word-level linking)
+    ///   - wordRect: Rettangolo opzionale della parola in coordinate locali del nodo
+    func startLinking(from source: SynapseNode, wordRange: NSRange? = nil, wordRect: CGRect? = nil) {
         isLinking = true
         tempLinkSource = source
-        tempDragPoint = source.position
+        tempLinkWordRange = wordRange
+        tempLinkWordRect = wordRect
+        
+        // Punto di partenza: centro della parola o centro del nodo
+        if let wordRect = wordRect {
+            // Converti wordRect da coordinate locali del nodo a coordinate world
+            // Il nodo è posizionato con .position come centro, quindi:
+            // topLeft del nodo = position - size/2
+            let worldPoint = CGPoint(
+                x: source.position.x - source.size.width/2 + wordRect.midX,
+                y: source.position.y - source.size.height/2 + wordRect.midY
+            )
+            tempDragPoint = worldPoint
+        } else {
+            tempDragPoint = source.position
+        }
         focusedConnectionID = nil
     }
     
@@ -246,11 +275,16 @@ class MapViewModel {
     /// - Returns: La connessione creata, o nil se il linking è fallito
     @discardableResult
     func endLinking(at endPoint: CGPoint) -> SynapseConnection? {
+        // Salva il word range prima del defer che lo resetta
+        let wordRange = tempLinkWordRange
+        
         defer {
             // Reset dello stato di linking
             isLinking = false
             tempLinkSource = nil
             tempDragPoint = .zero
+            tempLinkWordRange = nil
+            tempLinkWordRect = nil
         }
         
         guard let source = tempLinkSource else {
@@ -263,8 +297,8 @@ class MapViewModel {
             return nil
         }
         
-        // Crea la connessione
-        if let connection = createConnection(from: source, to: target, label: "") {
+        // Crea la connessione (passa il range della parola se presente)
+        if let connection = createConnection(from: source, to: target, label: "", fromRange: wordRange) {
             // Imposta il focus sulla nuova connessione per editing immediato
             focusedConnectionID = connection.id
             return connection
@@ -278,6 +312,8 @@ class MapViewModel {
         isLinking = false
         tempLinkSource = nil
         tempDragPoint = .zero
+        tempLinkWordRange = nil
+        tempLinkWordRect = nil
     }
     
     /// Rimuove il focus dalla connessione corrente.
@@ -524,9 +560,10 @@ class MapViewModel {
     ///   - source: Nodo di partenza
     ///   - target: Nodo di destinazione
     ///   - label: Etichetta della connessione (default: stringa vuota)
+    ///   - fromRange: Range opzionale del testo sorgente per word-level linking
     /// - Returns: La connessione appena creata, o nil se source == target
     @discardableResult
-    func createConnection(from source: SynapseNode, to target: SynapseNode, label: String = "") -> SynapseConnection? {
+    func createConnection(from source: SynapseNode, to target: SynapseNode, label: String = "", fromRange: NSRange? = nil) -> SynapseConnection? {
         // Previeni connessioni auto-referenziali
         guard source.id != target.id else {
             print("Impossibile creare una connessione da un nodo a se stesso")
@@ -543,7 +580,7 @@ class MapViewModel {
             return nil
         }
         
-        let connection = SynapseConnection(source: source, target: target, label: label)
+        let connection = SynapseConnection(source: source, target: target, label: label, fromRange: fromRange)
         modelContext.insert(connection)
         connections.append(connection)
         
@@ -631,20 +668,58 @@ class MapViewModel {
     
     // MARK: - Text Styling
     
-    /// Applica il grassetto a tutto il testo del nodo selezionato
+    /// Applica il grassetto:
+    /// - Se in editing (isEditingNode): alla selezione corrente tramite activeTextView
+    /// - Se nodo selezionato ma NON in editing: a tutto il testo del nodo
     func applyBoldToSelectedNode() {
+        // CONTEXT CHECK: Solo se siamo effettivamente in modalità editing
+        if isEditingNode, let textView = activeTextView, let formattable = textView as? FormattableTextView {
+            formattable.toggleBold(nil)
+            return
+        }
+        // Fallback: applica a tutto il nodo
         guard let node = selectedNode else { return }
         applyFontTrait(.boldFontMask, to: node)
     }
     
-    /// Applica il corsivo a tutto il testo del nodo selezionato
+    /// Applica il corsivo:
+    /// - Se in editing (isEditingNode): alla selezione corrente tramite activeTextView
+    /// - Se nodo selezionato ma NON in editing: a tutto il testo del nodo
     func applyItalicToSelectedNode() {
+        // CONTEXT CHECK: Solo se siamo effettivamente in modalità editing
+        if isEditingNode, let textView = activeTextView, let formattable = textView as? FormattableTextView {
+            formattable.toggleItalic(nil)
+            return
+        }
+        // Fallback: applica a tutto il nodo
         guard let node = selectedNode else { return }
         applyFontTrait(.italicFontMask, to: node)
     }
     
-    /// Applica/rimuove la sottolineatura a tutto il testo del nodo selezionato
+    /// Applica/rimuove il colore Rosso (Toggle):
+    /// - Se in editing (isEditingNode): toggle rosso/default sulla selezione corrente
+    /// - Se nodo selezionato ma NON in editing: toggle rosso/default su tutto il testo
+    func applyRedColorToSelectedNode() {
+        // CONTEXT CHECK: Solo se siamo effettivamente in modalità editing
+        if isEditingNode, let textView = activeTextView, let formattable = textView as? FormattableTextView {
+            formattable.toggleRedColor()
+            return
+        }
+        // Fallback: applica a tutto il nodo
+        guard let node = selectedNode else { return }
+        toggleRedColorOnNode(node)
+    }
+    
+    /// Applica la sottolineatura:
+    /// - Se in editing (isEditingNode): alla selezione corrente tramite activeTextView
+    /// - Se nodo selezionato ma NON in editing: a tutto il testo del nodo
     func applyUnderlineToSelectedNode() {
+        // CONTEXT CHECK: Solo se siamo effettivamente in modalità editing
+        if isEditingNode, let textView = activeTextView, let formattable = textView as? FormattableTextView {
+            formattable.underline(nil)
+            return
+        }
+        // Fallback: applica a tutto il nodo
         guard let node = selectedNode else { return }
         toggleUnderline(on: node)
     }
@@ -737,6 +812,61 @@ class MapViewModel {
         // Toggle underline
         let newStyle: Int = hasUnderline ? NSUnderlineStyle([]).rawValue : NSUnderlineStyle.single.rawValue
         attributedString.addAttribute(.underlineStyle, value: newStyle, range: fullRange)
+        
+        // Salva i dati modificati nel nodo
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    /// Toggle del colore rosso su tutto il testo di un nodo.
+    /// Se tutto il testo è rosso, lo riporta al colore di default.
+    /// Se tutto o parte del testo non è rosso, lo rende tutto rosso.
+    private func toggleRedColorOnNode(_ node: SynapseNode) {
+        // Ottieni l'NSAttributedString dal nodo
+        let attributedString: NSMutableAttributedString
+        
+        if let data = node.richTextData,
+           let existing = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+            attributedString = NSMutableAttributedString(attributedString: existing)
+        } else if !node.text.isEmpty {
+            attributedString = NSMutableAttributedString(string: node.text, attributes: [
+                .font: NSFont.systemFont(ofSize: 14)
+            ])
+        } else {
+            return
+        }
+        
+        guard attributedString.length > 0 else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        
+        // Verifica se tutto il testo è già rosso
+        var isAllRed = true
+        attributedString.enumerateAttribute(.foregroundColor, in: fullRange, options: []) { value, _, stop in
+            if let color = value as? NSColor {
+                // Usa confronto RGB approssimativo
+                if let rgb = color.usingColorSpace(.deviceRGB),
+                   let redRGB = NSColor.red.usingColorSpace(.deviceRGB) {
+                    let rDiff = abs(rgb.redComponent - redRGB.redComponent)
+                    let gDiff = abs(rgb.greenComponent - redRGB.greenComponent)
+                    let bDiff = abs(rgb.blueComponent - redRGB.blueComponent)
+                    if rDiff > 0.1 || gDiff > 0.1 || bDiff > 0.1 {
+                        isAllRed = false
+                        stop.pointee = true
+                    }
+                } else {
+                    isAllRed = false
+                    stop.pointee = true
+                }
+            } else {
+                // Nessun colore = default, non è rosso
+                isAllRed = false
+                stop.pointee = true
+            }
+        }
+        
+        // Toggle: se tutto rosso -> default, altrimenti -> rosso
+        let newColor: NSColor = isAllRed ? .labelColor : .red
+        attributedString.addAttribute(.foregroundColor, value: newColor, range: fullRange)
         
         // Salva i dati modificati nel nodo
         saveAttributedString(attributedString, to: node)

@@ -27,6 +27,10 @@ struct RichTextEditor: NSViewRepresentable {
     /// Callback quando l'editing termina (perdita focus)
     var onCommit: (() -> Void)?
     
+    /// Callback per esporre la NSTextView sottostante al ViewModel.
+    /// Indispensabile per permettere alla Toolbar esterna di agire sull'editor attivo.
+    var onResolveEditor: ((NSTextView) -> Void)?
+    
     // MARK: - NSViewRepresentable
     
     func makeNSView(context: Context) -> NSScrollView {
@@ -84,7 +88,10 @@ struct RichTextEditor: NSViewRepresentable {
         // rimossa dalla gerarchia). Con weak, il blocco semplicemente non fa nulla.
         if isEditable {
             DispatchQueue.main.async { [weak textView] in
-                textView?.window?.makeFirstResponder(textView)
+                guard let textView = textView else { return }
+                textView.window?.makeFirstResponder(textView)
+                // Espone la textView al viewmodel
+                onResolveEditor?(textView)
             }
         }
         
@@ -99,25 +106,27 @@ struct RichTextEditor: NSViewRepresentable {
             textView.isEditable = isEditable
         }
         
-        // Ricarica il contenuto se i dati sono cambiati
-        // Compara i dati attuali con quelli nella textView
-        let currentData = data
-        let textViewData: Data?
-        if let storage = textView.textStorage, storage.length > 0 {
-            textViewData = try? storage.data(from: NSRange(location: 0, length: storage.length),
-                                              documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
-        } else {
-            textViewData = nil
+        // PROTEZIONE UPDATE LOOP:
+        // Se la textView è attualmente il first responder (utente sta editando),
+        // NON sovrascrivere il contenuto - causerebbe reset di cursor e selezione.
+        // Gli aggiornamenti arrivano già dal Coordinator.textDidChange.
+        let isFirstResponder = textView.window?.firstResponder == textView
+        if isFirstResponder {
+            // Ri-espone la textView al ViewModel per sicurezza
+            onResolveEditor?(textView)
+            return
         }
         
-        // Se i dati sono diversi, aggiorna il contenuto
-        if currentData != textViewData {
-            if let data = currentData,
-               let attributedString = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
-                textView.textStorage?.setAttributedString(attributedString)
-            } else if !plainText.isEmpty && textView.string != plainText {
-                textView.string = plainText
-            }
+        // Ricarica il contenuto SOLO se la textView non è in focus
+        // IMPORTANTE: Applica sempre l'attributed string per catturare cambi di STILE
+        // (non solo cambi di testo plain)
+        if let currentData = data,
+           let attributedString = try? NSAttributedString(data: currentData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+            // Applica l'attributed string (include stili)
+            // Il confronto plain text non basta perché gli stili potrebbero cambiare
+            textView.textStorage?.setAttributedString(attributedString)
+        } else if !plainText.isEmpty && textView.string != plainText {
+            textView.string = plainText
         }
     }
     
@@ -300,7 +309,45 @@ class FormattableTextView: NSTextView {
         notifyTextChange()
     }
     
-    /// Attiva/disattiva la sottolineatura sulla selezione o su tutto il testo
+    /// Toggle del colore rosso per la selezione corrente o per tutto il testo.
+    /// Se la selezione è già rossa, la riporta al colore di default (labelColor).
+    /// Se la selezione non è rossa, la rende rossa.
+    @objc func toggleRedColor() {
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
+        
+        // Verifica se la selezione è già rossa
+        var isRed = true
+        storage.enumerateAttribute(.foregroundColor, in: range, options: []) { value, _, stop in
+            if let color = value as? NSColor {
+                // Confronta con rosso (tolleranza per diverse rappresentazioni)
+                if !color.isClose(to: .red) {
+                    isRed = false
+                    stop.pointee = true
+                }
+            } else {
+                // Nessun colore = default (nero) -> non è rosso
+                isRed = false
+                stop.pointee = true
+            }
+        }
+        
+        // Toggle: se rosso -> default, se non rosso -> rosso
+        let newColor: NSColor = isRed ? .labelColor : .red
+        storage.addAttribute(.foregroundColor, value: newColor, range: range)
+        notifyTextChange()
+    }
+    
+    /// Imposta un colore specifico per la selezione corrente o per tutto il testo (legacy)
+    /// Nota: rinominato da setTextColor per evitare conflitto con NSText.textColor setter
+    @objc func applyColor(_ color: NSColor) {
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
+        
+        storage.addAttribute(.foregroundColor, value: color, range: range)
+        notifyTextChange()
+    }
+
     @objc override func underline(_ sender: Any?) {
         let range = effectiveRange
         guard range.length > 0, let storage = textStorage else { return }
@@ -409,4 +456,116 @@ class FormattableTextView: NSTextView {
     private func notifyTextChange() {
         delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: self))
     }
+    
+    // MARK: - Word Hit Testing
+    
+    /// Risultato del word hit testing
+    struct WordHitResult {
+        let range: NSRange       // Range della parola nel testo
+        let rect: CGRect         // Rettangolo della parola in coordinate della textView
+        let word: String         // Il testo della parola
+    }
+    
+    /// Trova la parola sotto il punto specificato (in coordinate della textView)
+    /// - Parameter point: Punto in coordinate locali della textView
+    /// - Returns: WordHitResult se una parola è stata trovata, nil altrimenti
+    func findWord(at point: CGPoint) -> WordHitResult? {
+        guard let layoutManager = layoutManager,
+              let textContainer = textContainer,
+              let textStorage = textStorage,
+              textStorage.length > 0 else { return nil }
+        
+        // 1. Trova l'indice del glifo più vicino
+        // Sottrai l'inset del container
+        let adjustedPoint = CGPoint(
+            x: point.x - textContainerInset.width,
+            y: point.y - textContainerInset.height
+        )
+        
+        // Verifica che il punto sia all'interno dell'area del testo
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        guard usedRect.contains(adjustedPoint) else { return nil }
+        
+        let glyphIndex = layoutManager.glyphIndex(for: adjustedPoint, in: textContainer)
+        
+        // 2. Converti in indice carattere
+        let charIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
+        
+        // Verifica che l'indice sia valido
+        guard charIndex < textStorage.length else { return nil }
+        
+        // 3. Espandi alla parola intera
+        let string = textStorage.string as NSString
+        let wordRange = string.rangeOfWord(at: charIndex)
+        
+        guard wordRange.length > 0 else { return nil }
+        
+        // 4. Calcola il rettangolo della parola
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: wordRange, actualCharacterRange: nil)
+        var wordRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        
+        // Aggiungi l'inset del container al rettangolo
+        wordRect.origin.x += textContainerInset.width
+        wordRect.origin.y += textContainerInset.height
+        
+        // 5. Estrai il testo della parola
+        let word = string.substring(with: wordRange)
+        
+        return WordHitResult(range: wordRange, rect: wordRect, word: word)
+    }
 }
+
+// MARK: - NSString Extension for Word Detection
+
+extension NSString {
+    /// Trova il range della parola all'indice specificato
+    func rangeOfWord(at index: Int) -> NSRange {
+        guard index >= 0 && index < length else { return NSRange(location: 0, length: 0) }
+        
+        let wordBoundaries = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        
+        // Trova l'inizio della parola
+        var start = index
+        while start > 0 {
+            let prevIndex = start - 1
+            let char = self.character(at: prevIndex)
+            if let scalar = Unicode.Scalar(char), wordBoundaries.contains(scalar) {
+                break
+            }
+            start = prevIndex
+        }
+        
+        // Trova la fine della parola
+        var end = index
+        while end < length {
+            let char = self.character(at: end)
+            if let scalar = Unicode.Scalar(char), wordBoundaries.contains(scalar) {
+                break
+            }
+            end += 1
+        }
+        
+        return NSRange(location: start, length: end - start)
+    }
+}
+
+// MARK: - NSColor Extension for Comparison
+
+extension NSColor {
+    /// Confronta due colori con tolleranza per le diverse rappresentazioni.
+    /// Utile per verificare se un colore è "rosso" anche se ha leggere variazioni.
+    func isClose(to other: NSColor, tolerance: CGFloat = 0.1) -> Bool {
+        // Converte entrambi i colori nello stesso color space per confronto
+        guard let selfRGB = self.usingColorSpace(.deviceRGB),
+              let otherRGB = other.usingColorSpace(.deviceRGB) else {
+            return false
+        }
+        
+        let rDiff = abs(selfRGB.redComponent - otherRGB.redComponent)
+        let gDiff = abs(selfRGB.greenComponent - otherRGB.greenComponent)
+        let bDiff = abs(selfRGB.blueComponent - otherRGB.blueComponent)
+        
+        return rDiff < tolerance && gDiff < tolerance && bDiff < tolerance
+    }
+}
+

@@ -29,24 +29,27 @@ struct TextFormattingToolbar: View {
     /// Callback per applicare la sottolineatura
     var onUnderline: () -> Void
     
+    /// Callback per applicare il colore rosso
+    var onRed: () -> Void
+    
     // MARK: - Body
     
     var body: some View {
         HStack(spacing: 4) {
-            // Bold
-            ToolbarButton(iconName: "bold", help: "Grassetto") {
-                onBold()
-            }
+            // Bold - Usa NonFocusableButton per non rubare focus dalla NSTextView
+            NonFocusableButton(iconName: "bold", help: "Grassetto", action: onBold)
             
             // Italic
-            ToolbarButton(iconName: "italic", help: "Corsivo") {
-                onItalic()
-            }
+            NonFocusableButton(iconName: "italic", help: "Corsivo", action: onItalic)
             
             // Underline
-            ToolbarButton(iconName: "underline", help: "Sottolineato") {
-                onUnderline()
-            }
+            NonFocusableButton(iconName: "underline", help: "Sottolineato", action: onUnderline)
+            
+            Divider()
+                .frame(height: 16)
+            
+            // Red Color - Toggle rosso/nero
+            NonFocusableButton(iconName: "paintbrush.fill", help: "Rosso (Toggle)", tintColor: .systemRed, action: onRed)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -67,11 +70,14 @@ struct TextFormattingToolbar: View {
 struct ToolbarButton: View {
     let iconName: String
     let help: String
+    var color: Color = .primary
     let action: () -> Void
     
     var body: some View {
         Button(action: action) {
             Image(systemName: iconName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(color)
                 .font(.system(size: 12, weight: .medium))
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
@@ -88,6 +94,7 @@ struct ToolbarButton: View {
 struct NonFocusableButton: NSViewRepresentable {
     let iconName: String
     let help: String
+    var tintColor: NSColor? = nil
     let action: () -> Void
     
     func makeNSView(context: Context) -> NSButton {
@@ -96,7 +103,14 @@ struct NonFocusableButton: NSViewRepresentable {
         // Configurazione immagine SF Symbol
         if let image = NSImage(systemSymbolName: iconName, accessibilityDescription: help) {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
-            button.image = image.withSymbolConfiguration(config)
+            var finalImage = image.withSymbolConfiguration(config) ?? image
+            
+            // Applica tintColor se specificato
+            if let color = tintColor {
+                finalImage = finalImage.tinted(with: color)
+            }
+            
+            button.image = finalImage
         }
         
         // Stile del pulsante
@@ -123,7 +137,14 @@ struct NonFocusableButton: NSViewRepresentable {
         // Aggiorna l'immagine se necessario
         if let image = NSImage(systemSymbolName: iconName, accessibilityDescription: help) {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
-            nsView.image = image.withSymbolConfiguration(config)
+            var finalImage = image.withSymbolConfiguration(config) ?? image
+            
+            // Applica tintColor se specificato
+            if let color = tintColor {
+                finalImage = finalImage.tinted(with: color)
+            }
+            
+            nsView.image = finalImage
         }
     }
     
@@ -141,5 +162,21 @@ struct NonFocusableButton: NSViewRepresentable {
         @objc func buttonClicked(_ sender: Any?) {
             action()
         }
+    }
+}
+
+// MARK: - NSImage Tinting Extension
+
+extension NSImage {
+    /// Crea una copia dell'immagine con il colore specificato come tinta.
+    /// Usato per colorare le icone SF Symbol.
+    func tinted(with color: NSColor) -> NSImage {
+        let image = self.copy() as! NSImage
+        image.lockFocus()
+        color.set()
+        let imageRect = NSRect(origin: .zero, size: image.size)
+        imageRect.fill(using: .sourceAtop)
+        image.unlockFocus()
+        return image
     }
 }

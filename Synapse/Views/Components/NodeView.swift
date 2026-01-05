@@ -39,11 +39,14 @@ struct NodeView: View {
     @FocusState private var isTextFieldFocused: Bool
     @State private var dragStartPosition: CGPoint = .zero
     
+    /// Riferimento alla NSTextView per word hit testing durante il linking
+    @State private var textViewRef: NSTextView?
+    
     // MARK: - Costanti Design
     
     private let cornerRadius: CGFloat = 6
-    private let horizontalPadding: CGFloat = 8
-    private let verticalPadding: CGFloat = 4
+    private let horizontalPadding: CGFloat = 4
+    private let verticalPadding: CGFloat = 2
     
     // MARK: - Ghost UI Computed
     
@@ -72,7 +75,10 @@ struct NodeView: View {
                     data: $localRichTextData,
                     plainText: $localText,
                     isEditable: true,
-                    onCommit: { finishEditing() }
+                    onCommit: { finishEditing() },
+                    onResolveEditor: { textView in
+                        viewModel.activeTextView = textView
+                    }
                 )
                 .padding(.horizontal, horizontalPadding)
                 .padding(.vertical, verticalPadding)
@@ -92,22 +98,39 @@ struct NodeView: View {
                     RichTextEditor(
                         data: $localRichTextData,
                         plainText: $localText,
-                        isEditable: false
+                        isEditable: false,
+                        onResolveEditor: { textView in
+                            textViewRef = textView
+                        }
                     )
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)
+                    // Permetti hit testing per word-level linking
                     .allowsHitTesting(false)
                 } else {
-                    Text(localText.isEmpty ? "..." : localText)
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundColor(localText.isEmpty ? .secondary : .primary)
-                        .lineLimit(nil)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, horizontalPadding)
-                        .padding(.vertical, verticalPadding)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .allowsHitTesting(false)
+                    RichTextEditor(
+                        data: .constant(nil),
+                        plainText: .constant(localText.isEmpty ? "..." : localText),
+                        isEditable: false,
+                        onResolveEditor: { textView in
+                            textViewRef = textView
+                        }
+                    )
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.vertical, verticalPadding)
+                    .opacity(localText.isEmpty ? 0.5 : 1.0)
+                    .allowsHitTesting(false)
                 }
+            }
+            
+            // UX "Hover Ghost" Halo: Evidenzia la parola sorgente durante il linking
+            // Feedback visivo immediato: se c'è alone, il link parte dalla parola.
+            if isLinkingSource, let wordRect = viewModel.tempLinkWordRect {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.gray.opacity(0.2))
+                    .frame(width: wordRect.width + 4, height: wordRect.height + 2)
+                    .position(x: wordRect.midX, y: wordRect.midY)
+                    .allowsHitTesting(false)
             }
         }
         .frame(
@@ -157,7 +180,6 @@ struct NodeView: View {
             if isSelected {
                 localRichTextData = node.richTextData
                 localText = node.text
-                print("DEBUG: NodeView \(node.id) refreshed due to styleVersion change")
             }
         }
     }
@@ -189,6 +211,8 @@ struct NodeView: View {
         guard isEditing else { return }
         isEditing = false
         viewModel.isEditingNode = false
+        // IMPORTANTE: Resetta activeTextView per permettere alla toolbar di funzionare in node-mode
+        viewModel.activeTextView = nil
         viewModel.updateNodeRichText(node, richTextData: localRichTextData, plainText: localText)
         
         // Auto-resize: adatta la larghezza al testo
@@ -221,7 +245,31 @@ struct NodeView: View {
                 let shiftPressed = NSEvent.modifierFlags.contains(.shift)
                 if shiftPressed {
                     if !viewModel.isLinking {
-                        viewModel.startLinking(from: node)
+                        // Prova a trovare una parola sotto il cursore (inizio del drag)
+                        if let textView = textViewRef as? FormattableTextView {
+                            // Converti la posizione in coordinate della textView
+                            // startLocation è relativa al NodeView
+                            let localPoint = convertToTextViewCoordinates(value.startLocation)
+                            
+                            if let wordHit = textView.findWord(at: localPoint) {
+                                // Word-level linking: crea il rettangolo in coordinate del nodo
+                                // Il rettangolo della parola è in coordinate della textView,
+                                // dobbiamo aggiungerci il padding per ottenere coordinate del nodo
+                                let adjustedRect = CGRect(
+                                    x: wordHit.rect.origin.x + horizontalPadding,
+                                    y: wordHit.rect.origin.y + verticalPadding,
+                                    width: wordHit.rect.width,
+                                    height: wordHit.rect.height
+                                )
+                                viewModel.startLinking(from: node, wordRange: wordHit.range, wordRect: adjustedRect)
+                            } else {
+                                // Node-level linking (nessuna parola trovata)
+                                viewModel.startLinking(from: node)
+                            }
+                        } else {
+                            // Fallback: node-level linking (nessuna textView disponibile)
+                            viewModel.startLinking(from: node)
+                        }
                     }
                     viewModel.updateLinkingDrag(to: value.location)
                 } else {
@@ -236,6 +284,17 @@ struct NodeView: View {
                     viewModel.endLinking(at: value.location)
                 }
             }
+    }
+    
+    /// Converte un punto da coordinate del NodeView a coordinate della textView
+    /// Tiene conto dei padding applicati alla textView
+    private func convertToTextViewCoordinates(_ point: CGPoint) -> CGPoint {
+        // La textView è inset di horizontalPadding e verticalPadding rispetto al NodeView
+        // Assicuriamoci che i valori corrispondano esattemente ai padding applicati alla RichTextEditor
+        return CGPoint(
+            x: point.x - horizontalPadding,
+            y: point.y - verticalPadding
+        )
     }
     
     // MARK: - Context Menu
