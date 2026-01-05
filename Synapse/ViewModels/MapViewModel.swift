@@ -50,6 +50,10 @@ class MapViewModel {
     /// Indica se un nodo è attualmente in modalità editing (TextField attiva)
     var isEditingNode: Bool = false
     
+    /// Contatore che viene incrementato quando si applica uno stile al testo.
+    /// Usato per forzare un refresh della vista quando i dati del nodo cambiano.
+    var styleVersion: Int = 0
+    
     /// Indica se una connessione è attualmente in modalità editing
     var isEditingConnection: Bool {
         editingConnectionID != nil || focusedConnectionID != nil
@@ -623,6 +627,136 @@ class MapViewModel {
     func pan(delta: CGPoint) {
         panOffset.x += delta.x
         panOffset.y += delta.y
+    }
+    
+    // MARK: - Text Styling
+    
+    /// Applica il grassetto a tutto il testo del nodo selezionato
+    func applyBoldToSelectedNode() {
+        guard let node = selectedNode else { return }
+        applyFontTrait(.boldFontMask, to: node)
+    }
+    
+    /// Applica il corsivo a tutto il testo del nodo selezionato
+    func applyItalicToSelectedNode() {
+        guard let node = selectedNode else { return }
+        applyFontTrait(.italicFontMask, to: node)
+    }
+    
+    /// Applica/rimuove la sottolineatura a tutto il testo del nodo selezionato
+    func applyUnderlineToSelectedNode() {
+        guard let node = selectedNode else { return }
+        toggleUnderline(on: node)
+    }
+    
+    /// Applica o rimuove un tratto font (bold/italic) a tutto il testo di un nodo.
+    /// Se tutto il testo ha già il tratto, lo rimuove (toggle).
+    private func applyFontTrait(_ trait: NSFontTraitMask, to node: SynapseNode) {
+        // Ottieni l'NSAttributedString dal nodo
+        let attributedString: NSMutableAttributedString
+        
+        if let data = node.richTextData,
+           let existing = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+            attributedString = NSMutableAttributedString(attributedString: existing)
+        } else if !node.text.isEmpty {
+            // Se non c'è rich text, crea un attributed string dal testo plain
+            attributedString = NSMutableAttributedString(string: node.text, attributes: [
+                .font: NSFont.systemFont(ofSize: 14)
+            ])
+        } else {
+            return
+        }
+        
+        guard attributedString.length > 0 else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        let fontManager = NSFontManager.shared
+        
+        // Determina se tutto il testo ha già questo tratto
+        var allHaveTrait = true
+        attributedString.enumerateAttribute(.font, in: fullRange, options: []) { value, _, stop in
+            if let font = value as? NSFont {
+                if !fontManager.traits(of: font).contains(trait) {
+                    allHaveTrait = false
+                    stop.pointee = true
+                }
+            } else {
+                allHaveTrait = false
+                stop.pointee = true
+            }
+        }
+        
+        // Applica o rimuove il tratto
+        attributedString.enumerateAttribute(.font, in: fullRange, options: []) { value, attrRange, _ in
+            let currentFont = (value as? NSFont) ?? NSFont.systemFont(ofSize: 14)
+            let newFont: NSFont
+            
+            if allHaveTrait {
+                // Rimuovi tratto
+                newFont = fontManager.convert(currentFont, toNotHaveTrait: trait)
+            } else {
+                // Aggiungi tratto
+                newFont = fontManager.convert(currentFont, toHaveTrait: trait)
+            }
+            
+            attributedString.addAttribute(.font, value: newFont, range: attrRange)
+        }
+        
+        // Salva i dati modificati nel nodo
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    /// Attiva/disattiva la sottolineatura su tutto il testo di un nodo.
+    private func toggleUnderline(on node: SynapseNode) {
+        // Ottieni l'NSAttributedString dal nodo
+        let attributedString: NSMutableAttributedString
+        
+        if let data = node.richTextData,
+           let existing = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+            attributedString = NSMutableAttributedString(attributedString: existing)
+        } else if !node.text.isEmpty {
+            attributedString = NSMutableAttributedString(string: node.text, attributes: [
+                .font: NSFont.systemFont(ofSize: 14)
+            ])
+        } else {
+            return
+        }
+        
+        guard attributedString.length > 0 else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        
+        // Verifica se tutto il testo ha già underline
+        var hasUnderline = false
+        attributedString.enumerateAttribute(.underlineStyle, in: fullRange, options: []) { value, _, _ in
+            if let style = value as? Int, style != NSUnderlineStyle([]).rawValue {
+                hasUnderline = true
+            }
+        }
+        
+        // Toggle underline
+        let newStyle: Int = hasUnderline ? NSUnderlineStyle([]).rawValue : NSUnderlineStyle.single.rawValue
+        attributedString.addAttribute(.underlineStyle, value: newStyle, range: fullRange)
+        
+        // Salva i dati modificati nel nodo
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    /// Salva un NSAttributedString nel nodo come richTextData.
+    private func saveAttributedString(_ attributedString: NSAttributedString, to node: SynapseNode) {
+        do {
+            let data = try attributedString.data(
+                from: NSRange(location: 0, length: attributedString.length),
+                documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
+            )
+            node.richTextData = data
+            node.text = attributedString.string
+            
+            // Forza un refresh della UI incrementando il contatore di versione
+            styleVersion += 1
+        } catch {
+            print("Errore salvataggio rich text: \(error)")
+        }
     }
 }
 

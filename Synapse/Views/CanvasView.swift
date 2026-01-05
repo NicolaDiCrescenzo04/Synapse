@@ -133,6 +133,21 @@ struct CanvasView: View {
             }
         }
         .overlay(zoomHUD, alignment: .bottomLeading)
+        // Toolbar di formattazione - appare quando un nodo è selezionato (non in editing)
+        .overlay(alignment: .top) {
+            if let vm = viewModel,
+               vm.selectedNodeID != nil,
+               !vm.isEditingNode {
+                TextFormattingToolbar(
+                    onBold: { vm.applyBoldToSelectedNode() },
+                    onItalic: { vm.applyItalicToSelectedNode() },
+                    onUnderline: { vm.applyUnderlineToSelectedNode() }
+                )
+                .padding(.top, 20)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: vm.selectedNodeID)
+            }
+        }
         .background(Color(NSColor.windowBackgroundColor)) // Sfondo app
     }
     

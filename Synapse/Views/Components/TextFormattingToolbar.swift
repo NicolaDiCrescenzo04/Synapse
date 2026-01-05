@@ -3,8 +3,7 @@
 //  Synapse
 //
 //  Barra degli strumenti flottante per la formattazione del testo.
-//  Invia azioni al First Responder (che sarà la NSTextView attiva).
-//  IMPORTANTE: Usa NSButton con refusesFirstResponder per non rubare il focus.
+//  Usa SwiftUI Button per garantire che i click vengano catturati correttamente.
 //
 
 import SwiftUI
@@ -19,36 +18,34 @@ import AppKit
 
 struct TextFormattingToolbar: View {
     
+    // MARK: - Callbacks
+    
+    /// Callback per applicare il grassetto
+    var onBold: () -> Void
+    
+    /// Callback per applicare il corsivo
+    var onItalic: () -> Void
+    
+    /// Callback per applicare la sottolineatura
+    var onUnderline: () -> Void
+    
     // MARK: - Body
     
     var body: some View {
         HStack(spacing: 4) {
             // Bold
-            NonFocusableButton(iconName: "bold", help: "Grassetto (⌘B)") {
-                NSApp.sendAction(#selector(FormattableTextActions.toggleBold(_:)), to: nil, from: nil)
+            ToolbarButton(iconName: "bold", help: "Grassetto") {
+                onBold()
             }
             
             // Italic
-            NonFocusableButton(iconName: "italic", help: "Corsivo (⌘I)") {
-                NSApp.sendAction(#selector(FormattableTextActions.toggleItalic(_:)), to: nil, from: nil)
+            ToolbarButton(iconName: "italic", help: "Corsivo") {
+                onItalic()
             }
             
             // Underline
-            NonFocusableButton(iconName: "underline", help: "Sottolineato (⌘U)") {
-                NSApp.sendAction(#selector(FormattableTextActions.underline(_:)), to: nil, from: nil)
-            }
-            
-            Divider()
-                .frame(height: 16)
-            
-            // Font Panel - per cambiare dimensione e famiglia font
-            NonFocusableButton(iconName: "textformat.size", help: "Dimensione Font") {
-                openFontPanel()
-            }
-            
-            // Color Panel - per cambiare colore testo
-            NonFocusableButton(iconName: "paintpalette.fill", help: "Colore Testo") {
-                openColorPanel()
+            ToolbarButton(iconName: "underline", help: "Sottolineato") {
+                onUnderline()
             }
         }
         .padding(.horizontal, 8)
@@ -61,31 +58,30 @@ struct TextFormattingToolbar: View {
                 .stroke(Color(.separatorColor), lineWidth: 0.5)
         )
     }
+}
+
+// MARK: - Toolbar Button (SwiftUI Native)
+
+/// Pulsante semplice per la toolbar usando SwiftUI Button nativo.
+/// Evita problemi di hit testing con NSButton wrapper.
+struct ToolbarButton: View {
+    let iconName: String
+    let help: String
+    let action: () -> Void
     
-    // MARK: - Azioni Pannelli
-    
-    /// Apre il pannello Font di sistema
-    private func openFontPanel() {
-        let fontPanel = NSFontPanel.shared
-        fontPanel.orderFront(nil)
-    }
-    
-    /// Apre il pannello Colore di sistema
-    private func openColorPanel() {
-        let colorPanel = NSColorPanel.shared
-        colorPanel.mode = .wheel
-        colorPanel.showsAlpha = true
-        colorPanel.isContinuous = true
-        
-        // Imposta l'azione per inviare il colore selezionato al first responder
-        colorPanel.setTarget(nil)
-        colorPanel.setAction(NSSelectorFromString("changeColor:"))
-        
-        colorPanel.orderFront(nil)
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: iconName)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 
-// MARK: - Non-Focusable Button
+// MARK: - Non-Focusable Button (Legacy - kept for reference)
 
 /// Wrapper NSViewRepresentable che crea un pulsante che non ruba il focus dalla NSTextView.
 /// Questo è fondamentale per permettere la formattazione del testo senza uscire dall'edit mode.

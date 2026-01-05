@@ -98,6 +98,27 @@ struct RichTextEditor: NSViewRepresentable {
         if textView.isEditable != isEditable {
             textView.isEditable = isEditable
         }
+        
+        // Ricarica il contenuto se i dati sono cambiati
+        // Compara i dati attuali con quelli nella textView
+        let currentData = data
+        let textViewData: Data?
+        if let storage = textView.textStorage, storage.length > 0 {
+            textViewData = try? storage.data(from: NSRange(location: 0, length: storage.length),
+                                              documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
+        } else {
+            textViewData = nil
+        }
+        
+        // Se i dati sono diversi, aggiorna il contenuto
+        if currentData != textViewData {
+            if let data = currentData,
+               let attributedString = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+                textView.textStorage?.setAttributedString(attributedString)
+            } else if !plainText.isEmpty && textView.string != plainText {
+                textView.string = plainText
+            }
+        }
     }
     
     func makeCoordinator() -> Coordinator {
@@ -248,83 +269,69 @@ class FormattableTextView: NSTextView {
     
     /// Restituisce il range su cui applicare le modifiche:
     /// - Se c'è una selezione valida (lunghezza > 0), usa quella
-    /// - Altrimenti, usa i typingAttributes per il testo che verrà digitato
-    private var effectiveRange: NSRange? {
+    /// - Altrimenti, restituisce l'intero range del testo (per applicare stili a tutto il nodo)
+    private var effectiveRange: NSRange {
         let range = selectedRange()
-        return range.length > 0 ? range : nil
+        // Se c'è una selezione esplicita, usa quella
+        if range.length > 0 {
+            return range
+        }
+        // Altrimenti, restituisci l'intera lunghezza del testo
+        return NSRange(location: 0, length: textStorage?.length ?? 0)
     }
     
     // MARK: - Azioni di Formattazione
     
-    /// Attiva/disattiva il grassetto sulla selezione o per il testo futuro
+    /// Attiva/disattiva il grassetto sulla selezione o su tutto il testo
     @objc func toggleBold(_ sender: Any?) {
-        if let range = effectiveRange {
-            // Applica alla selezione
+        let range = effectiveRange
+        if range.length > 0 {
             applyTraitToSelection(.boldFontMask, inRange: range)
-        } else {
-            // Modifica typingAttributes per il testo futuro
-            toggleTypingAttributeTrait(.boldFontMask)
         }
         notifyTextChange()
     }
     
-    /// Attiva/disattiva il corsivo sulla selezione o per il testo futuro
+    /// Attiva/disattiva il corsivo sulla selezione o su tutto il testo
     @objc func toggleItalic(_ sender: Any?) {
-        if let range = effectiveRange {
-            // Applica alla selezione
+        let range = effectiveRange
+        if range.length > 0 {
             applyTraitToSelection(.italicFontMask, inRange: range)
-        } else {
-            // Modifica typingAttributes per il testo futuro
-            toggleTypingAttributeTrait(.italicFontMask)
         }
         notifyTextChange()
     }
     
-    /// Attiva/disattiva la sottolineatura sulla selezione o per il testo futuro
+    /// Attiva/disattiva la sottolineatura sulla selezione o su tutto il testo
     @objc override func underline(_ sender: Any?) {
-        if let range = effectiveRange, let storage = textStorage {
-            // Verifica se la selezione ha già underline
-            var hasUnderline = false
-            storage.enumerateAttribute(.underlineStyle, in: range, options: []) { value, _, _ in
-                if let style = value as? Int, style != NSUnderlineStyle([]).rawValue {
-                    hasUnderline = true
-                }
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
+        
+        // Verifica se il range ha già underline
+        var hasUnderline = false
+        storage.enumerateAttribute(.underlineStyle, in: range, options: []) { value, _, _ in
+            if let style = value as? Int, style != NSUnderlineStyle([]).rawValue {
+                hasUnderline = true
             }
-            
-            // Toggle underline
-            let newStyle: Int = hasUnderline ? NSUnderlineStyle([]).rawValue : NSUnderlineStyle.single.rawValue
-            storage.addAttribute(.underlineStyle, value: newStyle, range: range)
-        } else {
-            // Modifica typingAttributes per il testo futuro
-            var attrs = typingAttributes
-            let currentStyle = (attrs[.underlineStyle] as? Int) ?? 0
-            let newStyle: Int = currentStyle == 0 ? NSUnderlineStyle.single.rawValue : NSUnderlineStyle([]).rawValue
-            attrs[.underlineStyle] = newStyle
-            typingAttributes = attrs
         }
+        
+        // Toggle underline
+        let newStyle: Int = hasUnderline ? NSUnderlineStyle([]).rawValue : NSUnderlineStyle.single.rawValue
+        storage.addAttribute(.underlineStyle, value: newStyle, range: range)
         notifyTextChange()
     }
 
     @objc func setFontSize(_ fontSize: CGFloat) {
-        guard let storage = textStorage else { return }
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
         
-        if let range = effectiveRange {
-            // Cambia dimensione per ogni font nella selezione
-            storage.enumerateAttribute(.font, in: range, options: []) { value, attrRange, _ in
-                if let font = value as? NSFont {
-                    let newFont = NSFontManager.shared.convert(font, toSize: fontSize)
-                    storage.addAttribute(.font, value: newFont, range: attrRange)
-                } else {
-                    // Se non c'è font, usa il system font con la nuova dimensione
-                    storage.addAttribute(.font, value: NSFont.systemFont(ofSize: fontSize), range: attrRange)
-                }
+        // Cambia dimensione per ogni font nel range
+        storage.enumerateAttribute(.font, in: range, options: []) { value, attrRange, _ in
+            if let font = value as? NSFont {
+                let newFont = NSFontManager.shared.convert(font, toSize: fontSize)
+                storage.addAttribute(.font, value: newFont, range: attrRange)
+            } else {
+                // Se non c'è font, usa il system font con la nuova dimensione
+                storage.addAttribute(.font, value: NSFont.systemFont(ofSize: fontSize), range: attrRange)
             }
-        } else {
-            // Modifica typingAttributes per il testo futuro
-            var attrs = typingAttributes
-            let currentFont = (attrs[.font] as? NSFont) ?? .systemFont(ofSize: 14)
-            attrs[.font] = NSFontManager.shared.convert(currentFont, toSize: fontSize)
-            typingAttributes = attrs
         }
         notifyTextChange()
     }
@@ -336,19 +343,14 @@ class FormattableTextView: NSTextView {
         guard let fontManager = sender as? NSFontManager,
               let storage = textStorage else { return }
         
-        if let range = effectiveRange {
-            // Applica il cambio font alla selezione
-            storage.enumerateAttribute(.font, in: range, options: []) { value, attrRange, _ in
-                let currentFont = (value as? NSFont) ?? .systemFont(ofSize: 14)
-                let newFont = fontManager.convert(currentFont)
-                storage.addAttribute(.font, value: newFont, range: attrRange)
-            }
-        } else {
-            // Applica ai typingAttributes
-            var attrs = typingAttributes
-            let currentFont = (attrs[.font] as? NSFont) ?? .systemFont(ofSize: 14)
-            attrs[.font] = fontManager.convert(currentFont)
-            typingAttributes = attrs
+        let range = effectiveRange
+        guard range.length > 0 else { return }
+        
+        // Applica il cambio font al range
+        storage.enumerateAttribute(.font, in: range, options: []) { value, attrRange, _ in
+            let currentFont = (value as? NSFont) ?? .systemFont(ofSize: 14)
+            let newFont = fontManager.convert(currentFont)
+            storage.addAttribute(.font, value: newFont, range: attrRange)
         }
         notifyTextChange()
     }
@@ -358,14 +360,10 @@ class FormattableTextView: NSTextView {
     /// Override di changeColor per supportare NSColorPanel
     override func changeColor(_ sender: Any?) {
         let color = NSColorPanel.shared.color
+        let range = effectiveRange
         
-        if let range = effectiveRange, let storage = textStorage {
-            storage.addAttribute(.foregroundColor, value: color, range: range)
-        } else {
-            var attrs = typingAttributes
-            attrs[.foregroundColor] = color
-            typingAttributes = attrs
-        }
+        guard range.length > 0, let storage = textStorage else { return }
+        storage.addAttribute(.foregroundColor, value: color, range: range)
         notifyTextChange()
     }
     
@@ -405,23 +403,6 @@ class FormattableTextView: NSTextView {
             
             storage.addAttribute(.font, value: newFont, range: attrRange)
         }
-    }
-    
-    /// Toggle di un tratto nei typingAttributes (per testo futuro senza selezione)
-    private func toggleTypingAttributeTrait(_ trait: NSFontTraitMask) {
-        let fontManager = NSFontManager.shared
-        var attrs = typingAttributes
-        let currentFont = (attrs[.font] as? NSFont) ?? .systemFont(ofSize: 14)
-        
-        let newFont: NSFont
-        if fontManager.traits(of: currentFont).contains(trait) {
-            newFont = fontManager.convert(currentFont, toNotHaveTrait: trait)
-        } else {
-            newFont = fontManager.convert(currentFont, toHaveTrait: trait)
-        }
-        
-        attrs[.font] = newFont
-        typingAttributes = attrs
     }
     
     /// Notifica che il testo è cambiato (per aggiornare i binding)

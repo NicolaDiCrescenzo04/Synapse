@@ -54,16 +54,16 @@ final class SynapseNode {
     // MARK: - Costanti
     
     /// Larghezza minima del nodo
-    static let minWidth: Double = 100
+    static let minWidth: Double = 60
     
     /// Altezza minima del nodo
-    static let minHeight: Double = 50
+    static let minHeight: Double = 28
     
     /// Larghezza di default per nuovi nodi
-    static let defaultWidth: Double = 140
+    static let defaultWidth: Double = 100
     
     /// Altezza di default per nuovi nodi
-    static let defaultHeight: Double = 70
+    static let defaultHeight: Double = 36
     
     // MARK: - Relazioni
     
