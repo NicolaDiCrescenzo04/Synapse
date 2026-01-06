@@ -65,6 +65,9 @@ struct NodeView: View {
     /// Stato corrente dell'hover per feedback visivo pre-drag
     @State private var hoverTarget: HoverTarget = .none
     
+    /// Set di range delle parole selezionate con Cmd+Click per multi-word linking
+    @State private var selectedWordRanges: Set<NSRange> = []
+    
     // MARK: - Costanti Design
     
     private let cornerRadius: CGFloat = 6
@@ -146,9 +149,28 @@ struct NodeView: View {
                 }
             }
             
-            // UX "Hover Ghost" Halo: Feedback visivo sul target del link
-            // Appare su hover (prima del click), non solo durante il drag
-            if case .word(let rect, _) = hoverTarget, !isEditing {
+            // UX: Halo blu PERSISTENTE per parole selezionate con Cmd+Click
+            // Queste rimangono evidenziate finché non si deselezione
+            if !isEditing {
+                ForEach(Array(selectedWordRanges), id: \.self) { range in
+                    if let textView = textViewRef as? FormattableTextView,
+                       let wordHit = getRectForRange(range, in: textView) {
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.accentColor.opacity(0.3))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.accentColor.opacity(0.6), lineWidth: 1)
+                            )
+                            .frame(width: wordHit.width + 6, height: wordHit.height + 4)
+                            .position(x: wordHit.midX, y: wordHit.midY)
+                            .allowsHitTesting(false)
+                    }
+                }
+            }
+            
+            // UX "Hover Ghost" Halo grigio: Feedback visivo sul target potenziale
+            // Appare su hover, ma NON se la parola è già selezionata (evita doppio halo)
+            if case .word(let rect, let range) = hoverTarget, !isEditing, !selectedWordRanges.contains(range) {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.gray.opacity(0.25))
                     .frame(width: rect.width + 6, height: rect.height + 4)
@@ -202,7 +224,11 @@ struct NodeView: View {
             viewModel.isEditingNode = newValue
         }
         .onChange(of: isSelected) { _, newValue in
-            if !newValue { finishEditing() }
+            if !newValue {
+                finishEditing()
+                // Reset della selezione parole quando il nodo perde focus (standard behavior)
+                selectedWordRanges.removeAll()
+            }
         }
         .onChange(of: viewModel.nodeToEditID) { _, newValue in
             if newValue == node.id { startEditing() }
@@ -231,6 +257,22 @@ struct NodeView: View {
             finishEditing()
             return
         }
+        
+        // Cmd+Click: Toggle selezione parola per multi-word linking
+        if NSEvent.modifierFlags.contains(.command) {
+            if case .word(_, let range) = hoverTarget {
+                if selectedWordRanges.contains(range) {
+                    selectedWordRanges.remove(range)
+                } else {
+                    selectedWordRanges.insert(range)
+                }
+                return  // Non selezionare il nodo, solo toggle della parola
+            }
+        } else {
+            // Tap senza Command: pulisci la selezione (standard Finder behavior)
+            selectedWordRanges.removeAll()
+        }
+        
         viewModel.selectNode(node)
     }
     
@@ -285,11 +327,22 @@ struct NodeView: View {
                 let shiftPressed = NSEvent.modifierFlags.contains(.shift)
                 if shiftPressed {
                     if !viewModel.isLinking {
-                        // "What you see is what you link": usa lo stato hoverTarget corrente
-                        // invece di ricalcolare da zero (l'utente ha già visto l'halo)
+                        // Determina se linkare le parole selezionate o la singola parola
                         switch hoverTarget {
                         case .word(let rect, let range):
-                            viewModel.startLinking(from: node, wordRange: range, wordRect: rect)
+                            if selectedWordRanges.contains(range) && !selectedWordRanges.isEmpty {
+                                // Parti da una parola selezionata -> verifica contiguità
+                                let ranges = Array(selectedWordRanges)
+                                if isContiguousSelection(ranges) {
+                                    // Selezione contigua: linka TUTTE le selezionate
+                                    viewModel.startLinking(from: node, wordRanges: ranges, wordRect: rect)
+                                    selectedWordRanges.removeAll()
+                                }
+                                // else: selezione discontinua -> ignora il gesto, non fare nulla
+                            } else {
+                                // Parti da una parola non selezionata -> linka solo quella
+                                viewModel.startLinking(from: node, wordRange: range, wordRect: rect)
+                            }
                         case .node, .none:
                             viewModel.startLinking(from: node)
                         }
@@ -323,29 +376,72 @@ struct NodeView: View {
     /// Aggiorna lo stato hoverTarget in base alla posizione del mouse
     private func updateHoverTarget(at point: CGPoint) {
         guard let textView = textViewRef as? FormattableTextView else {
-            print("[DEBUG] updateHoverTarget: textViewRef is nil, falling back to .node")
             hoverTarget = .node
             return
         }
         
         // Converti da Node Space a Text Space (sottraendo padding)
         let textPoint = convertToTextViewCoordinates(point)
-        print("[DEBUG] updateHoverTarget: point=\(point), textPoint=\(textPoint)")
         
         if let wordHit = textView.findWord(at: textPoint) {
-            // Trovata parola: converti il rettangolo da Text Space a Node Space (aggiungendo padding)
+            // Trovata parola: converti il rettangolo da Text Space a Node Space
             let adjustedRect = CGRect(
                 x: wordHit.rect.origin.x + horizontalPadding,
                 y: wordHit.rect.origin.y + verticalPadding,
                 width: wordHit.rect.width,
                 height: wordHit.rect.height
             )
-            print("[DEBUG] Found word '\(wordHit.word)' at rect=\(adjustedRect)")
             hoverTarget = .word(rect: adjustedRect, range: wordHit.range)
         } else {
-            print("[DEBUG] No word found at textPoint=\(textPoint)")
             hoverTarget = .node
         }
+    }
+    
+    /// Calcola il rettangolo per un range dato, usando la stessa matematica dell'hover halo
+    /// per garantire consistenza visiva perfetta.
+    private func getRectForRange(_ range: NSRange, in textView: FormattableTextView) -> CGRect? {
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return nil }
+        
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        
+        // Aggiungi textContainerInset (stesso calcolo di findWord)
+        rect.origin.x += textView.textContainerInset.width
+        rect.origin.y += textView.textContainerInset.height
+        
+        // Converti da Text Space a Node Space (aggiungendo padding - stessa math dell'hover)
+        return CGRect(
+            x: rect.origin.x + horizontalPadding,
+            y: rect.origin.y + verticalPadding,
+            width: rect.width,
+            height: rect.height
+        )
+    }
+    
+    /// Verifica se un set di range forma una selezione contigua.
+    /// Restituisce true se tutti i range sono adiacenti (gap ≤ 3 caratteri).
+    private func isContiguousSelection(_ ranges: [NSRange]) -> Bool {
+        guard ranges.count > 1 else { return true }  // Singolo range è sempre contiguo
+        
+        // Ordina per posizione nel testo
+        let sorted = ranges.sorted { $0.location < $1.location }
+        
+        for i in 1..<sorted.count {
+            let prev = sorted[i - 1]
+            let curr = sorted[i]
+            
+            // Calcola gap tra fine del precedente e inizio del corrente
+            let prevEnd = prev.location + prev.length
+            let gap = curr.location - prevEnd
+            
+            // Gap > 3 caratteri = discontinuo
+            if gap > 3 {
+                return false
+            }
+        }
+        
+        return true
     }
     
     // MARK: - Context Menu

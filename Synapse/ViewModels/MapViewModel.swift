@@ -94,8 +94,9 @@ class MapViewModel {
     var tempDragPoint: CGPoint = .zero
     
     /// Range della parola sorgente durante word-level linking (opzionale)
-    /// Se nil, il linking parte dal nodo intero
-    var tempLinkWordRange: NSRange?
+    /// Supporta parole multiple per Cmd+Click selection
+    /// Se nil o vuoto, il linking parte dal nodo intero
+    var tempLinkWordRanges: [NSRange]?
     
     /// Rettangolo della parola sorgente in coordinate locali del nodo (opzionale)
     var tempLinkWordRect: CGRect?
@@ -238,12 +239,12 @@ class MapViewModel {
     /// Chiamato quando l'utente inizia un Shift+Drag su un nodo.
     /// - Parameters:
     ///   - source: Il nodo di partenza
-    ///   - wordRange: Range opzionale della parola nel testo (per word-level linking)
-    ///   - wordRect: Rettangolo opzionale della parola in coordinate locali del nodo
-    func startLinking(from source: SynapseNode, wordRange: NSRange? = nil, wordRect: CGRect? = nil) {
+    ///   - wordRanges: Array opzionale di range delle parole (per multi-word linking)
+    ///   - wordRect: Rettangolo opzionale della prima parola in coordinate locali del nodo
+    func startLinking(from source: SynapseNode, wordRanges: [NSRange]? = nil, wordRect: CGRect? = nil) {
         isLinking = true
         tempLinkSource = source
-        tempLinkWordRange = wordRange
+        tempLinkWordRanges = wordRanges
         tempLinkWordRect = wordRect
         
         // Punto di partenza: centro della parola o centro del nodo
@@ -262,6 +263,15 @@ class MapViewModel {
         focusedConnectionID = nil
     }
     
+    /// Convenience per singolo range (retrocompatibilità)
+    func startLinking(from source: SynapseNode, wordRange: NSRange?, wordRect: CGRect? = nil) {
+        if let range = wordRange {
+            startLinking(from: source, wordRanges: [range], wordRect: wordRect)
+        } else {
+            startLinking(from: source, wordRanges: nil, wordRect: wordRect)
+        }
+    }
+    
     /// Aggiorna la posizione del punto di drag durante il linking.
     /// Chiamato in tempo reale durante il gesture.
     /// - Parameter point: La nuova posizione del mouse
@@ -275,15 +285,15 @@ class MapViewModel {
     /// - Returns: La connessione creata, o nil se il linking è fallito
     @discardableResult
     func endLinking(at endPoint: CGPoint) -> SynapseConnection? {
-        // Salva il word range prima del defer che lo resetta
-        let wordRange = tempLinkWordRange
+        // Salva i word ranges prima del defer che li resetta
+        let wordRanges = tempLinkWordRanges
         
         defer {
             // Reset dello stato di linking
             isLinking = false
             tempLinkSource = nil
             tempDragPoint = .zero
-            tempLinkWordRange = nil
+            tempLinkWordRanges = nil
             tempLinkWordRect = nil
         }
         
@@ -297,8 +307,8 @@ class MapViewModel {
             return nil
         }
         
-        // Crea la connessione (passa il range della parola se presente)
-        if let connection = createConnection(from: source, to: target, label: "", fromRange: wordRange) {
+        // Crea la connessione (passa i range delle parole se presenti)
+        if let connection = createConnection(from: source, to: target, label: "", fromRanges: wordRanges) {
             // Imposta il focus sulla nuova connessione per editing immediato
             focusedConnectionID = connection.id
             return connection
@@ -312,7 +322,7 @@ class MapViewModel {
         isLinking = false
         tempLinkSource = nil
         tempDragPoint = .zero
-        tempLinkWordRange = nil
+        tempLinkWordRanges = nil
         tempLinkWordRect = nil
     }
     
@@ -560,31 +570,61 @@ class MapViewModel {
     ///   - source: Nodo di partenza
     ///   - target: Nodo di destinazione
     ///   - label: Etichetta della connessione (default: stringa vuota)
-    ///   - fromRange: Range opzionale del testo sorgente per word-level linking
+    ///   - fromRanges: Array opzionale di range del testo sorgente per word-level linking
     /// - Returns: La connessione appena creata, o nil se source == target
     @discardableResult
-    func createConnection(from source: SynapseNode, to target: SynapseNode, label: String = "", fromRange: NSRange? = nil) -> SynapseConnection? {
+    func createConnection(from source: SynapseNode, to target: SynapseNode, label: String = "", fromRanges: [NSRange]? = nil) -> SynapseConnection? {
         // Previeni connessioni auto-referenziali
         guard source.id != target.id else {
             print("Impossibile creare una connessione da un nodo a se stesso")
             return nil
         }
         
-        // Verifica che non esista già una connessione identica
-        let existingConnection = connections.first { 
-            $0.source?.id == source.id && $0.target?.id == target.id 
+        // Verifica che non esista già una connessione IDENTICA
+        // Una connessione è duplicata solo se ha: stesso source + target + stesso fromRanges
+        // Link da parole diverse verso lo stesso target sono PERMESSI (parallel links)
+        let existingConnection = connections.first { conn in
+            guard conn.source?.id == source.id && conn.target?.id == target.id else {
+                return false
+            }
+            
+            // Se entrambi sono node-level (no ranges)
+            if conn.fromRanges == nil && fromRanges == nil {
+                return true  // Duplicato node-level
+            }
+            
+            // Confronta i range per word-level connections
+            if let existingRanges = conn.fromRanges, let newRanges = fromRanges {
+                // Considera duplicato solo se i range sono identici (stesso set)
+                let existingSet = Set(existingRanges)
+                let newSet = Set(newRanges)
+                return existingSet == newSet
+            }
+            
+            // Un node-level e un word-level non sono duplicati
+            return false
         }
         
         if existingConnection != nil {
-            print("Connessione già esistente tra questi nodi")
+            print("Connessione identica già esistente")
             return nil
         }
         
-        let connection = SynapseConnection(source: source, target: target, label: label, fromRange: fromRange)
+        let connection = SynapseConnection(source: source, target: target, label: label, fromRanges: fromRanges)
         modelContext.insert(connection)
         connections.append(connection)
         
         return connection
+    }
+    
+    /// Convenience per singolo range (retrocompatibilità)
+    @discardableResult
+    func createConnection(from source: SynapseNode, to target: SynapseNode, label: String = "", fromRange: NSRange?) -> SynapseConnection? {
+        if let range = fromRange {
+            return createConnection(from: source, to: target, label: label, fromRanges: [range])
+        } else {
+            return createConnection(from: source, to: target, label: label, fromRanges: nil)
+        }
     }
     
     /// Aggiorna l'etichetta di una connessione.

@@ -102,22 +102,31 @@ struct ConnectionView: View {
             let labelPosition = bezierMidpoint(from: startPoint, to: endPoint, control1: controlPoints.0, control2: controlPoints.1)
             
             Group {
-                // Sottolineatura della parola se ancorata
-                if connection.isWordAnchored, let range = connection.fromTextRange, let wordRect = calculateWordRect(for: range, in: sourceNode) {
-                    // Calcola posizione underline in coordinate world, 2px sotto il testo
+                // Sottolineatura delle parole se ancorata (supporta range multipli con merge)
+                if connection.isWordAnchored, let ranges = connection.fromRanges {
                     let nodeTopLeft = CGPoint(
                         x: sourceNode.position.x - sourceNode.size.width / 2,
                         y: sourceNode.position.y - sourceNode.size.height / 2
                     )
-                    let underlineY = nodeTopLeft.y + wordRect.maxY + 2
-                    let underlineXStart = nodeTopLeft.x + wordRect.minX
-                    let underlineXEnd = nodeTopLeft.x + wordRect.maxX
                     
-                    Path { path in
-                        path.move(to: CGPoint(x: underlineXStart, y: underlineY))
-                        path.addLine(to: CGPoint(x: underlineXEnd, y: underlineY))
+                    // Raggruppa range adiacenti per rendering "merged"
+                    let groups = groupAdjacentRanges(ranges, in: sourceNode)
+                    
+                    ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
+                        // Calcola il rect unito per il gruppo
+                        if let unionRect = calculateUnionRect(for: group, in: sourceNode) {
+                            // Disegna un'unica sottolineatura per il gruppo
+                            let underlineY = nodeTopLeft.y + unionRect.maxY + 2
+                            let underlineXStart = nodeTopLeft.x + unionRect.minX
+                            let underlineXEnd = nodeTopLeft.x + unionRect.maxX
+                            
+                            Path { path in
+                                path.move(to: CGPoint(x: underlineXStart, y: underlineY))
+                                path.addLine(to: CGPoint(x: underlineXEnd, y: underlineY))
+                            }
+                            .stroke(lineColor, lineWidth: 2)
+                        }
                     }
-                    .stroke(lineColor, lineWidth: 2)
                 }
                 
                 // Linea curva Bézier - VISIBILE
@@ -356,6 +365,71 @@ struct ConnectionView: View {
             width: rect.width,
             height: rect.height
         )
+    }
+    
+    /// Raggruppa range adiacenti per il merge delle sottolineature.
+    /// Due range sono considerati "adiacenti" se sono sulla stessa linea Y e
+    /// separati da pochi caratteri (spazi/punteggiatura).
+    private func groupAdjacentRanges(_ ranges: [NSRange], in node: SynapseNode) -> [[NSRange]] {
+        guard ranges.count > 1 else {
+            return ranges.isEmpty ? [] : [ranges]
+        }
+        
+        // Ordina per posizione nel testo
+        let sorted = ranges.sorted { $0.location < $1.location }
+        
+        var groups: [[NSRange]] = []
+        var currentGroup: [NSRange] = [sorted[0]]
+        
+        for i in 1..<sorted.count {
+            let prev = sorted[i - 1]
+            let curr = sorted[i]
+            
+            // Calcola distanza tra fine del precedente e inizio del corrente
+            let prevEnd = prev.location + prev.length
+            let gap = curr.location - prevEnd
+            
+            // Se il gap è piccolo (max 3 caratteri: spazio + punteggiatura),
+            // e sulla stessa linea -> merge
+            if gap <= 3 {
+                // Verifica che siano sulla stessa riga (confronta Y dei rect)
+                if let prevRect = calculateWordRect(for: prev, in: node),
+                   let currRect = calculateWordRect(for: curr, in: node) {
+                    let sameLine = abs(prevRect.midY - currRect.midY) < 5
+                    if sameLine {
+                        currentGroup.append(curr)
+                        continue
+                    }
+                }
+            }
+            
+            // Non adiacenti: salva gruppo corrente e inizia uno nuovo
+            groups.append(currentGroup)
+            currentGroup = [curr]
+        }
+        
+        // Aggiungi ultimo gruppo
+        groups.append(currentGroup)
+        
+        return groups
+    }
+    
+    /// Calcola il rettangolo unione per un gruppo di range.
+    private func calculateUnionRect(for ranges: [NSRange], in node: SynapseNode) -> CGRect? {
+        guard !ranges.isEmpty else { return nil }
+        
+        var unionRect: CGRect?
+        for range in ranges {
+            if let rect = calculateWordRect(for: range, in: node) {
+                if unionRect == nil {
+                    unionRect = rect
+                } else {
+                    unionRect = unionRect!.union(rect)
+                }
+            }
+        }
+        
+        return unionRect
     }
     
     // MARK: - Curva Bézier
