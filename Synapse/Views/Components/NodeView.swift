@@ -11,6 +11,26 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+// MARK: - Hover Target Enum
+
+/// Enum per tracciare cosa sta puntando il mouse (per feedback visivo pre-drag)
+enum HoverTarget: Equatable {
+    case none
+    case node
+    case word(rect: CGRect, range: NSRange)
+    
+    static func == (lhs: HoverTarget, rhs: HoverTarget) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none), (.node, .node):
+            return true
+        case let (.word(r1, rng1), .word(r2, rng2)):
+            return r1 == r2 && rng1 == rng2
+        default:
+            return false
+        }
+    }
+}
+
 struct NodeView: View {
     
     // MARK: - Proprietà
@@ -41,6 +61,9 @@ struct NodeView: View {
     
     /// Riferimento alla NSTextView per word hit testing durante il linking
     @State private var textViewRef: NSTextView?
+    
+    /// Stato corrente dell'hover per feedback visivo pre-drag
+    @State private var hoverTarget: HoverTarget = .none
     
     // MARK: - Costanti Design
     
@@ -123,13 +146,13 @@ struct NodeView: View {
                 }
             }
             
-            // UX "Hover Ghost" Halo: Evidenzia la parola sorgente durante il linking
-            // Feedback visivo immediato: se c'è alone, il link parte dalla parola.
-            if isLinkingSource, let wordRect = viewModel.tempLinkWordRect {
+            // UX "Hover Ghost" Halo: Feedback visivo sul target del link
+            // Appare su hover (prima del click), non solo durante il drag
+            if case .word(let rect, _) = hoverTarget, !isEditing {
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.gray.opacity(0.2))
-                    .frame(width: wordRect.width + 4, height: wordRect.height + 2)
-                    .position(x: wordRect.midX, y: wordRect.midY)
+                    .fill(Color.gray.opacity(0.25))
+                    .frame(width: rect.width + 6, height: rect.height + 4)
+                    .position(x: rect.midX, y: rect.midY)
                     .allowsHitTesting(false)
             }
         }
@@ -138,10 +161,27 @@ struct NodeView: View {
             height: max(SynapseNode.minHeight, node.height)
         )
         .contentShape(Rectangle())
-        .position(node.position)
         .onHover { hovering in
             isHovered = hovering
+            if !hovering {
+                hoverTarget = .none
+            }
         }
+        .onContinuousHover { phase in
+            guard !isEditing else {
+                hoverTarget = .none
+                return
+            }
+            switch phase {
+            case .active(let location):
+                updateHoverTarget(at: location)
+            case .ended:
+                hoverTarget = .none
+            @unknown default:
+                hoverTarget = .none
+            }
+        }
+        .position(node.position)
         .applyIf(!isEditing) { view in
             view.gesture(combinedGesture)
         }
@@ -245,29 +285,12 @@ struct NodeView: View {
                 let shiftPressed = NSEvent.modifierFlags.contains(.shift)
                 if shiftPressed {
                     if !viewModel.isLinking {
-                        // Prova a trovare una parola sotto il cursore (inizio del drag)
-                        if let textView = textViewRef as? FormattableTextView {
-                            // Converti la posizione in coordinate della textView
-                            // startLocation è relativa al NodeView
-                            let localPoint = convertToTextViewCoordinates(value.startLocation)
-                            
-                            if let wordHit = textView.findWord(at: localPoint) {
-                                // Word-level linking: crea il rettangolo in coordinate del nodo
-                                // Il rettangolo della parola è in coordinate della textView,
-                                // dobbiamo aggiungerci il padding per ottenere coordinate del nodo
-                                let adjustedRect = CGRect(
-                                    x: wordHit.rect.origin.x + horizontalPadding,
-                                    y: wordHit.rect.origin.y + verticalPadding,
-                                    width: wordHit.rect.width,
-                                    height: wordHit.rect.height
-                                )
-                                viewModel.startLinking(from: node, wordRange: wordHit.range, wordRect: adjustedRect)
-                            } else {
-                                // Node-level linking (nessuna parola trovata)
-                                viewModel.startLinking(from: node)
-                            }
-                        } else {
-                            // Fallback: node-level linking (nessuna textView disponibile)
+                        // "What you see is what you link": usa lo stato hoverTarget corrente
+                        // invece di ricalcolare da zero (l'utente ha già visto l'halo)
+                        switch hoverTarget {
+                        case .word(let rect, let range):
+                            viewModel.startLinking(from: node, wordRange: range, wordRect: rect)
+                        case .node, .none:
                             viewModel.startLinking(from: node)
                         }
                     }
@@ -289,12 +312,40 @@ struct NodeView: View {
     /// Converte un punto da coordinate del NodeView a coordinate della textView
     /// Tiene conto dei padding applicati alla textView
     private func convertToTextViewCoordinates(_ point: CGPoint) -> CGPoint {
-        // La textView è inset di horizontalPadding e verticalPadding rispetto al NodeView
-        // Assicuriamoci che i valori corrispondano esattemente ai padding applicati alla RichTextEditor
+        // La textView è inset di horizontalPadding (4) e verticalPadding (2) rispetto al NodeView
+        // Detection: sottrarre padding converte da Node Space a Text Space
         return CGPoint(
             x: point.x - horizontalPadding,
             y: point.y - verticalPadding
         )
+    }
+    
+    /// Aggiorna lo stato hoverTarget in base alla posizione del mouse
+    private func updateHoverTarget(at point: CGPoint) {
+        guard let textView = textViewRef as? FormattableTextView else {
+            print("[DEBUG] updateHoverTarget: textViewRef is nil, falling back to .node")
+            hoverTarget = .node
+            return
+        }
+        
+        // Converti da Node Space a Text Space (sottraendo padding)
+        let textPoint = convertToTextViewCoordinates(point)
+        print("[DEBUG] updateHoverTarget: point=\(point), textPoint=\(textPoint)")
+        
+        if let wordHit = textView.findWord(at: textPoint) {
+            // Trovata parola: converti il rettangolo da Text Space a Node Space (aggiungendo padding)
+            let adjustedRect = CGRect(
+                x: wordHit.rect.origin.x + horizontalPadding,
+                y: wordHit.rect.origin.y + verticalPadding,
+                width: wordHit.rect.width,
+                height: wordHit.rect.height
+            )
+            print("[DEBUG] Found word '\(wordHit.word)' at rect=\(adjustedRect)")
+            hoverTarget = .word(rect: adjustedRect, range: wordHit.range)
+        } else {
+            print("[DEBUG] No word found at textPoint=\(textPoint)")
+            hoverTarget = .node
+        }
     }
     
     // MARK: - Context Menu

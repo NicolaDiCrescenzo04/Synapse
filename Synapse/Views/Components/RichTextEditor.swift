@@ -82,16 +82,17 @@ struct RichTextEditor: NSViewRepresentable {
         textView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
         
-        // Auto-focus se è in modalità editing
+        // Espone SEMPRE la textView al viewmodel (necessario per word hit testing in hover)
         // EDUCATIONAL: Usiamo [weak textView] perché la textView potrebbe essere
         // deallocata prima che il blocco async venga eseguito (es. se la view viene
         // rimossa dalla gerarchia). Con weak, il blocco semplicemente non fa nulla.
-        if isEditable {
-            DispatchQueue.main.async { [weak textView] in
-                guard let textView = textView else { return }
+        DispatchQueue.main.async { [weak textView] in
+            guard let textView = textView else { return }
+            // Espone la textView al viewmodel per word hit testing
+            onResolveEditor?(textView)
+            // Auto-focus solo se è in modalità editing
+            if isEditable {
                 textView.window?.makeFirstResponder(textView)
-                // Espone la textView al viewmodel
-                onResolveEditor?(textView)
             }
         }
         
@@ -239,6 +240,17 @@ class FormattableTextView: NSTextView {
         DispatchQueue.main.async { [weak self] in
             self?.layoutManager?.ensureLayout(for: self?.textContainer ?? NSTextContainer())
             self?.centerVertically()
+        }
+    }
+    
+    /// Auto-focus quando la view viene aggiunta a una finestra (fix per nuovi nodi)
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Se la textView è editabile e ha una finestra, diventa first responder
+        guard isEditable, let window = window else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            window.makeFirstResponder(self)
         }
     }
     

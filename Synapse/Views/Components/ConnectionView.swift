@@ -104,15 +104,20 @@ struct ConnectionView: View {
             Group {
                 // Sottolineatura della parola se ancorata
                 if connection.isWordAnchored, let range = connection.fromTextRange, let wordRect = calculateWordRect(for: range, in: sourceNode) {
-                    let underlineY = sourceNode.position.y - sourceNode.size.height/2 + wordRect.maxY
-                    let underlineXStart = sourceNode.position.x - sourceNode.size.width/2 + wordRect.minX
-                    let underlineXEnd = sourceNode.position.x - sourceNode.size.width/2 + wordRect.maxX
+                    // Calcola posizione underline in coordinate world, 2px sotto il testo
+                    let nodeTopLeft = CGPoint(
+                        x: sourceNode.position.x - sourceNode.size.width / 2,
+                        y: sourceNode.position.y - sourceNode.size.height / 2
+                    )
+                    let underlineY = nodeTopLeft.y + wordRect.maxY + 2
+                    let underlineXStart = nodeTopLeft.x + wordRect.minX
+                    let underlineXEnd = nodeTopLeft.x + wordRect.maxX
                     
                     Path { path in
                         path.move(to: CGPoint(x: underlineXStart, y: underlineY))
                         path.addLine(to: CGPoint(x: underlineXEnd, y: underlineY))
                     }
-                    .stroke(lineColor, lineWidth: 1.5)
+                    .stroke(lineColor, lineWidth: 2)
                 }
                 
                 // Linea curva Bézier - VISIBILE
@@ -238,10 +243,14 @@ struct ConnectionView: View {
         // Calcola la posizione della parola partendo dal testo del nodo
         if let wordRect = calculateWordRect(for: range, in: node) {
             // Converti da coordinate locali del nodo a coordinate world
-            // La freccia parte dal BORDO INFERIORE CENTRALE (per la sottolineatura)
+            // La freccia parte dal centro-basso della sottolineatura (wordRect.maxY + 2)
+            let nodeTopLeft = CGPoint(
+                x: node.position.x - node.size.width / 2,
+                y: node.position.y - node.size.height / 2
+            )
             return CGPoint(
-                x: node.position.x - node.size.width/2 + wordRect.midX,
-                y: node.position.y - node.size.height/2 + wordRect.maxY
+                x: nodeTopLeft.x + wordRect.midX,
+                y: nodeTopLeft.y + wordRect.maxY + 2 // 2px sotto = centro della sottolineatura
             )
         }
         
