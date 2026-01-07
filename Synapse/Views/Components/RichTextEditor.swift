@@ -24,12 +24,21 @@ struct RichTextEditor: NSViewRepresentable {
     /// Se true, permette l'editing. Se false, è sola lettura (selezionabile).
     var isEditable: Bool = true
     
+    /// Larghezza esplicita per il text wrapping (nil = auto-width, single-line)
+    var explicitWidth: CGFloat? = nil
+    
+    /// Se true, il testo va a capo (word wrap); se false, scorre orizzontalmente
+    var shouldWrapText: Bool = false
+    
     /// Callback quando l'editing termina (perdita focus)
     var onCommit: (() -> Void)?
     
     /// Callback per esporre la NSTextView sottostante al ViewModel.
     /// Indispensabile per permettere alla Toolbar esterna di agire sull'editor attivo.
     var onResolveEditor: ((NSTextView) -> Void)?
+    
+    /// Callback per notificare cambiamenti di altezza del contenuto (per auto-height in manual mode)
+    var onContentHeightChanged: ((CGFloat) -> Void)?
     
     // MARK: - NSViewRepresentable
     
@@ -60,9 +69,8 @@ struct RichTextEditor: NSViewRepresentable {
         textView.font = .systemFont(ofSize: 14)
         textView.alignment = .center 
         
-        // Configurazione container
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        // Configurazione container basata sulla modalità wrap
+        configureTextContainer(textView: textView)
         textView.textContainerInset = NSSize(width: 0, height: 0)
         
         // Imposta il contenuto iniziale
@@ -96,7 +104,54 @@ struct RichTextEditor: NSViewRepresentable {
             }
         }
         
+        // Report iniziale dell'altezza contenuto
+        reportContentHeight(textView: textView)
+        
         return scrollView
+    }
+    
+    /// Configura il text container in base alla modalità wrap
+    private func configureTextContainer(textView: NSTextView) {
+        guard let textContainer = textView.textContainer else { return }
+        
+        if shouldWrapText, let width = explicitWidth, width > 0 {
+            // MANUAL MODE: word-wrap attivo, larghezza fissa
+            textContainer.widthTracksTextView = false
+            textContainer.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            textView.isHorizontallyResizable = false
+            textView.isVerticallyResizable = true
+            
+            // FIX: Imposta minSize e maxSize per impedire che la view collassi o scompaia
+            textView.minSize = NSSize(width: width, height: 0)
+            textView.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            
+            // Forza la larghezza del frame della textView
+            var frame = textView.frame
+            frame.size.width = width
+            textView.frame = frame
+        } else {
+            // AUTO MODE: singola riga, cresce orizzontalmente
+            textContainer.widthTracksTextView = false
+            textContainer.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            textView.isHorizontallyResizable = true
+            textView.isVerticallyResizable = false
+            
+            // Reset minSize/maxSize per auto mode
+            textView.minSize = NSSize(width: 0, height: 0)
+            textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        }
+    }
+    
+    /// Calcola e notifica l'altezza del contenuto
+    private func reportContentHeight(textView: NSTextView) {
+        guard shouldWrapText, let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+        
+        // Forza il calcolo del layout
+        layoutManager.ensureLayout(for: textContainer)
+        
+        let contentHeight = layoutManager.usedRect(for: textContainer).height
+        onContentHeightChanged?(contentHeight)
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
@@ -107,6 +162,9 @@ struct RichTextEditor: NSViewRepresentable {
             textView.isEditable = isEditable
         }
         
+        // Aggiorna configurazione wrap (sempre, perché può cambiare dinamicamente)
+        configureTextContainer(textView: textView)
+        
         // PROTEZIONE UPDATE LOOP:
         // Se la textView è attualmente il first responder (utente sta editando),
         // NON sovrascrivere il contenuto - causerebbe reset di cursor e selezione.
@@ -115,6 +173,8 @@ struct RichTextEditor: NSViewRepresentable {
         if isFirstResponder {
             // Ri-espone la textView al ViewModel per sicurezza
             onResolveEditor?(textView)
+            // Report altezza anche durante l'editing (per wrap dinamico)
+            reportContentHeight(textView: textView)
             return
         }
         
@@ -129,6 +189,9 @@ struct RichTextEditor: NSViewRepresentable {
         } else if !plainText.isEmpty && textView.string != plainText {
             textView.string = plainText
         }
+        
+        // Report altezza contenuto dopo l'aggiornamento
+        reportContentHeight(textView: textView)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -160,6 +223,14 @@ struct RichTextEditor: NSViewRepresentable {
                     print("Errore salvataggio rich text: \(error)")
                 }
             }
+            
+            // 3. Report altezza contenuto (per auto-height in manual mode)
+            if parent.shouldWrapText, let layoutManager = textView.layoutManager,
+               let textContainer = textView.textContainer {
+                layoutManager.ensureLayout(for: textContainer)
+                let contentHeight = layoutManager.usedRect(for: textContainer).height
+                parent.onContentHeightChanged?(contentHeight)
+            }
         }
         
         func textDidEndEditing(_ notification: Notification) {
@@ -174,6 +245,11 @@ struct RichTextEditor: NSViewRepresentable {
 /// e centra verticalmente il contenuto.
 /// Gestisce anche Enter (conferma) vs Shift+Enter (a capo).
 class FormattableTextView: NSTextView {
+    
+    // MARK: - Layout Loop Protection
+    
+    /// Flag per prevenire loop infiniti di layout durante il centering verticale
+    private var isUpdatingLayout: Bool = false
     
     // MARK: - Setup Iniziale
     
@@ -246,16 +322,23 @@ class FormattableTextView: NSTextView {
     /// Auto-focus quando la view viene aggiunta a una finestra (fix per nuovi nodi)
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        // Se la textView è editabile e ha una finestra, diventa first responder
-        guard isEditable, let window = window else { return }
+        guard let window = window else { return }
+        
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            window.makeFirstResponder(self)
+            // Centra verticalmente subito all'apertura
+            self.centerVertically()
+            // Se editabile, diventa first responder
+            if self.isEditable {
+                window.makeFirstResponder(self)
+            }
         }
     }
     
     override func layout() {
         super.layout()
+        // Proteggi da loop infiniti di layout
+        guard !isUpdatingLayout else { return }
         centerVertically()
     }
     
@@ -269,20 +352,41 @@ class FormattableTextView: NSTextView {
         centerVertically()
     }
     
+    /// Centra verticalmente il testo nella view.
+    /// Funziona correttamente sia in modalità auto (singola riga) che manuale (testo a capo).
+    /// Usa isUpdatingLayout per prevenire loop infiniti.
     private func centerVertically() {
+        // Previeni loop infiniti
+        guard !isUpdatingLayout else { return }
         guard let container = textContainer, let layoutManager = layoutManager else { return }
         
-        // Forza il calcolo del layout prima di ottenere l'altezza del contenuto
+        // Attiva la protezione
+        isUpdatingLayout = true
+        defer { isUpdatingLayout = false }
+        
+        // Forza il calcolo del layout per assicurarsi che usedRect sia accurato
+        // Questo è cruciale per il testo a capo (wrapped text)
         layoutManager.ensureLayout(for: container)
         
-        let height = self.bounds.height
+        // Ottieni l'altezza della view e del contenuto
+        let viewHeight = self.bounds.height
         let contentHeight = layoutManager.usedRect(for: container).height
         
-        if contentHeight < height && contentHeight > 0 {
-            let topInset = (height - contentHeight) / 2.0
-            textContainerInset = NSSize(width: 0, height: max(0, floor(topInset)))
+        // Se il contenuto è più piccolo della view, centra verticalmente
+        if contentHeight < viewHeight && contentHeight > 0 && viewHeight > 0 {
+            let topInset = (viewHeight - contentHeight) / 2.0
+            // Usa floor per evitare pixel blurry
+            let newInset = NSSize(width: 0, height: max(0, floor(topInset)))
+            
+            // Evita update loop: aggiorna solo se c'è una differenza significativa
+            if abs(textContainerInset.height - newInset.height) > 0.5 {
+                textContainerInset = newInset
+            }
         } else {
-            textContainerInset = NSSize(width: 0, height: 0)
+            // Contenuto più grande o uguale alla view: nessun inset
+            if textContainerInset.height != 0 {
+                textContainerInset = NSSize(width: 0, height: 0)
+            }
         }
     }
     
@@ -462,6 +566,17 @@ class FormattableTextView: NSTextView {
             
             storage.addAttribute(.font, value: newFont, range: attrRange)
         }
+    }
+    
+    /// Inserisce i delimitatori LaTeX ($$$$) alla posizione del cursore corrente
+    /// e posiziona il cursore tra i delimitatori per permettere la digitazione immediata.
+    @objc func insertLatexDelimiters() {
+        let insertionPoint = selectedRange().location
+        let latex = "$$$$"
+        insertText(latex, replacementRange: selectedRange())
+        // Posiziona cursore tra i $$ (dopo i primi 2 caratteri)
+        setSelectedRange(NSRange(location: insertionPoint + 2, length: 0))
+        notifyTextChange()
     }
     
     /// Notifica che il testo è cambiato (per aggiornare i binding)

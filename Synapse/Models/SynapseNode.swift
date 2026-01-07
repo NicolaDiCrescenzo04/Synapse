@@ -51,6 +51,11 @@ final class SynapseNode {
     /// Dati del testo formattato (RTF/NSAttributedString) per supportare stili misti
     @Attribute(.externalStorage) var richTextData: Data?
     
+    /// Indica se il nodo è stato ridimensionato manualmente dall'utente.
+    /// Se true, la larghezza è fissa e il testo va a capo (word wrap).
+    /// Se false, il nodo auto-si adatta al contenuto (single-line, cresce orizzontalmente).
+    var isManuallySized: Bool = false
+    
     // MARK: - Costanti
     
     /// Larghezza minima del nodo

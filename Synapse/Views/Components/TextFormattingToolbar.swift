@@ -32,6 +32,9 @@ struct TextFormattingToolbar: View {
     /// Callback per applicare il colore rosso
     var onRed: () -> Void
     
+    /// Callback per inserire delimitatori LaTeX
+    var onLatex: () -> Void
+    
     // MARK: - Body
     
     var body: some View {
@@ -50,6 +53,12 @@ struct TextFormattingToolbar: View {
             
             // Red Color - Toggle rosso/nero
             NonFocusableButton(iconName: "paintbrush.fill", help: "Rosso (Toggle)", tintColor: .systemRed, action: onRed)
+            
+            Divider()
+                .frame(height: 16)
+            
+            // LaTeX - Inserisce delimitatori $$
+            NonFocusableButton(iconName: "sum", help: "LaTeX ($$)", action: onLatex)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

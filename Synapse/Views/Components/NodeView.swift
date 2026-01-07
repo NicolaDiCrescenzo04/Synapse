@@ -31,6 +31,15 @@ enum HoverTarget: Equatable {
     }
 }
 
+// MARK: - Resize Edge Enum
+
+/// Enum per identificare quale maniglia di resize è usata
+enum ResizeEdge {
+    case trailing   // Destra - resize orizzontale
+    case bottom     // Basso - resize verticale
+    case corner     // Angolo basso-destra - resize libero
+}
+
 struct NodeView: View {
     
     // MARK: - Proprietà
@@ -69,6 +78,17 @@ struct NodeView: View {
     /// Set di range delle parole selezionate con Cmd+Click per multi-word linking
     @State private var selectedWordRanges: Set<NSRange> = []
     
+    // MARK: - Resize State
+    
+    /// Dimensioni iniziali quando inizia il resize
+    @State private var resizeStartSize: CGSize = .zero
+    
+    /// Flag per tracciare se siamo in modalità resize
+    @State private var isResizing: Bool = false
+    
+    /// Altezza dinamica riportata dal RichTextEditor (per manual wrap mode)
+    @State private var reportedContentHeight: CGFloat = 0
+    
     // MARK: - Costanti Design
     
     private let cornerRadius: CGFloat = 6
@@ -102,9 +122,14 @@ struct NodeView: View {
                     data: $localRichTextData,
                     plainText: $localText,
                     isEditable: true,
+                    explicitWidth: node.isManuallySized ? node.width - (horizontalPadding * 2) - 8 : nil,
+                    shouldWrapText: node.isManuallySized,
                     onCommit: { finishEditing() },
                     onResolveEditor: { textView in
                         viewModel.activeTextView = textView
+                    },
+                    onContentHeightChanged: { height in
+                        handleContentHeightChange(height)
                     }
                 )
                 .padding(.horizontal, horizontalPadding)
@@ -118,7 +143,7 @@ struct NodeView: View {
                         .padding(4)
                         .allowsHitTesting(false)
                 } else if isLatex(localText) {
-                    LatexView(latex: extractLatex(from: localText))
+                    SmartLatexView(latex: extractLatex(from: localText))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .allowsHitTesting(false)
                 } else if localRichTextData != nil && !localText.isEmpty {
@@ -126,8 +151,13 @@ struct NodeView: View {
                         data: $localRichTextData,
                         plainText: $localText,
                         isEditable: false,
+                        explicitWidth: node.isManuallySized ? node.width - (horizontalPadding * 2) - 8 : nil,
+                        shouldWrapText: node.isManuallySized,
                         onResolveEditor: { textView in
                             textViewRef = textView
+                        },
+                        onContentHeightChanged: { height in
+                            handleContentHeightChange(height)
                         }
                     )
                     .padding(.horizontal, horizontalPadding)
@@ -139,8 +169,13 @@ struct NodeView: View {
                         data: .constant(nil),
                         plainText: .constant(localText.isEmpty ? "..." : localText),
                         isEditable: false,
+                        explicitWidth: node.isManuallySized ? node.width - (horizontalPadding * 2) - 8 : nil,
+                        shouldWrapText: node.isManuallySized,
                         onResolveEditor: { textView in
                             textViewRef = textView
+                        },
+                        onContentHeightChanged: { height in
+                            handleContentHeightChange(height)
                         }
                     )
                     .padding(.horizontal, horizontalPadding)
@@ -177,6 +212,12 @@ struct NodeView: View {
                     .frame(width: rect.width + 6, height: rect.height + 4)
                     .position(x: rect.midX, y: rect.midY)
                     .allowsHitTesting(false)
+            }
+            
+            // MARK: - Resize Handles
+            // Maniglie di resize visibili solo quando il nodo è selezionato e non in editing
+            if isSelected && !isEditing {
+                resizeHandlesOverlay
             }
         }
         .frame(
@@ -303,7 +344,11 @@ struct NodeView: View {
     }
     
     /// Calcola la larghezza necessaria per il testo e aggiorna node.width
+    /// NOTA: Non fa nulla se il nodo è in modalità manual (isManuallySized = true)
     private func autoResizeToFitText() {
+        // In manual mode, la larghezza è fissa - non fare auto-resize
+        guard !node.isManuallySized else { return }
+        
         let text = localText.isEmpty ? "..." : localText
         let font = NSFont.systemFont(ofSize: 14)
         let attributes: [NSAttributedString.Key: Any] = [.font: font]
@@ -470,6 +515,107 @@ struct NodeView: View {
         return true
     }
     
+    // MARK: - Resize Handles
+    
+    /// Overlay con la maniglia di resize (solo angolo basso-destra)
+    /// Usa un approccio semplificato con Color.clear + overlay e alignment
+    @ViewBuilder
+    private var resizeHandlesOverlay: some View {
+        let handleSize: CGFloat = 14
+        
+        Color.clear
+            .overlay(alignment: .bottomTrailing) {
+                // Maniglia d'angolo - usa .local coordinate space
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: handleSize, height: handleSize)
+                    .offset(x: handleSize / 2 - 2, y: handleSize / 2 - 2)
+                    .contentShape(Circle().size(width: handleSize + 10, height: handleSize + 10))
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .local)
+                            .onChanged { value in
+                                if !isResizing {
+                                    resizeStartSize = CGSize(width: node.width, height: node.height)
+                                    isResizing = true
+                                }
+                                // Usa translation diretta (più affidabile)
+                                let newWidth = resizeStartSize.width + value.translation.width
+                                let newHeight = resizeStartSize.height + value.translation.height
+                                
+                                node.width = max(SynapseNode.minWidth, newWidth)
+                                node.height = max(SynapseNode.minHeight, newHeight)
+                            }
+                            .onEnded { _ in
+                                isResizing = false
+                                node.isManuallySized = true
+                            }
+                    )
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.crosshair.push()
+                        } else {
+                            NSCursor.pop()
+                        }
+                    }
+            }
+    }
+    
+    /// Crea una gesture di resize per una specifica edge
+    private func resizeGesture(for edge: ResizeEdge) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                if !isResizing {
+                    resizeStartSize = CGSize(width: node.width, height: node.height)
+                    isResizing = true
+                }
+                updateNodeSize(for: edge, translation: value.translation)
+            }
+            .onEnded { _ in
+                isResizing = false
+                node.isManuallySized = true
+            }
+    }
+    
+    /// Aggiorna le dimensioni del nodo in base alla translation del drag
+    private func updateNodeSize(for edge: ResizeEdge, translation: CGSize) {
+        switch edge {
+        case .trailing:
+            // Solo larghezza - l'altezza si aggiorna automaticamente via callback
+            node.width = max(SynapseNode.minWidth, resizeStartSize.width + translation.width)
+        case .bottom:
+            // Solo altezza
+            node.height = max(SynapseNode.minHeight, resizeStartSize.height + translation.height)
+        case .corner:
+            // Entrambe le dimensioni
+            node.width = max(SynapseNode.minWidth, resizeStartSize.width + translation.width)
+            node.height = max(SynapseNode.minHeight, resizeStartSize.height + translation.height)
+        }
+    }
+    
+    /// Gestisce i cambiamenti di altezza del contenuto riportati da RichTextEditor
+    /// IMPORTANTE: Solo ESPANDE l'altezza quando il contenuto ne richiede di più,
+    /// non riduce MAI sotto l'altezza impostata manualmente dall'utente.
+    private func handleContentHeightChange(_ contentHeight: CGFloat) {
+        // NON modificare l'altezza durante il resize attivo dell'utente
+        guard !isResizing else { return }
+        
+        // Auto-height solo in manual mode
+        guard node.isManuallySized else { return }
+        
+        // Calcola l'altezza richiesta (contenuto + padding)
+        let requiredHeight = contentHeight + (verticalPadding * 2) + 8
+        
+        // SOLO ESPANDERE: aggiorna SOLO se il contenuto richiede PIÙ spazio
+        // Non ridurre mai sotto l'altezza attuale (impostata dall'utente)
+        let minRequiredHeight = max(SynapseNode.minHeight, requiredHeight)
+        
+        if minRequiredHeight > node.height {
+            // Il contenuto ha bisogno di più spazio - espandi
+            node.height = minRequiredHeight
+        }
+        // Se minRequiredHeight <= node.height, NON fare nulla - mantieni la height manuale
+    }
+    
     // MARK: - Context Menu
     
     @ViewBuilder
@@ -502,6 +648,18 @@ struct NodeView: View {
             selectImage()
         } label: {
             Label("Aggiungi Immagine", systemImage: "photo")
+        }
+        
+        // Opzione per resettare le dimensioni manuali
+        if node.isManuallySized {
+            Divider()
+            
+            Button {
+                node.isManuallySized = false
+                autoResizeToFitText()
+            } label: {
+                Label("Ripristina Dimensione Auto", systemImage: "arrow.counterclockwise")
+            }
         }
     }
     

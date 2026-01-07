@@ -1119,6 +1119,37 @@ class MapViewModel {
         toggleUnderline(on: node)
     }
     
+    /// Inserisce i delimitatori LaTeX ($$...$$):
+    /// - Se in editing (isEditingNode): inserisce $$$$ alla posizione del cursore
+    /// - Se nodo selezionato ma NON in editing: wrappa tutto il testo del nodo con $$
+    func insertLatexDelimiters() {
+        // CONTEXT CHECK: Solo se siamo effettivamente in modalità editing
+        if isEditingNode, let textView = activeTextView, let formattable = textView as? FormattableTextView {
+            formattable.insertLatexDelimiters()
+            return
+        }
+        // Fallback: wrappa tutto il testo del nodo selezionato
+        guard let node = selectedNode else { return }
+        wrapNodeTextWithLatex(node)
+    }
+    
+    /// Wrappa il testo di un nodo con delimitatori LaTeX $$...$$
+    private func wrapNodeTextWithLatex(_ node: SynapseNode) {
+        let currentText = node.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Se già ha i delimitatori, non farlo di nuovo
+        if currentText.hasPrefix("$$") && currentText.hasSuffix("$$") {
+            return
+        }
+        
+        // Wrappa il testo
+        node.text = "$$\(currentText)$$"
+        node.richTextData = nil // Rimuove rich text perché LaTeX non usa formattazione
+        
+        // Forza refresh della UI
+        styleVersion += 1
+    }
+    
     /// Applica o rimuove un tratto font (bold/italic) a tutto il testo di un nodo.
     /// Se tutto il testo ha già il tratto, lo rimuove (toggle).
     private func applyFontTrait(_ trait: NSFontTraitMask, to node: SynapseNode) {
