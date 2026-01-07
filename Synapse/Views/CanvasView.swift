@@ -22,6 +22,9 @@ struct CanvasView: View {
     @State private var dragOffset: CGSize = .zero
     @State private var lastMagnification: CGFloat = 1.0
     
+    // Stato per rubber band selection
+    @State private var isSelecting: Bool = false
+    
     // MARK: - Body
     
     var body: some View {
@@ -37,14 +40,26 @@ struct CanvasView: View {
                     Color.clear
                         .contentShape(Rectangle())
                         .gesture(
-                            DragGesture(minimumDistance: 10) // Minimo movimento per evitare conflitto con Tap
+                            DragGesture(minimumDistance: 5)
                                 .onChanged { value in
-                                    dragOffset = value.translation
+                                    guard let vm = viewModel else { return }
+                                    
+                                    // Converti in coordinate world
+                                    let worldStart = screenToWorld(value.startLocation, vm: vm)
+                                    let worldCurrent = screenToWorld(value.location, vm: vm)
+                                    
+                                    if !isSelecting {
+                                        // Inizia selezione rubber band
+                                        isSelecting = true
+                                        let additive = NSEvent.modifierFlags.contains(.shift)
+                                        vm.startSelection(at: worldStart, additive: additive)
+                                    }
+                                    
+                                    vm.updateSelection(to: worldCurrent)
                                 }
                                 .onEnded { value in
-                                    guard let vm = viewModel else { return }
-                                    vm.pan(delta: CGPoint(x: value.translation.width, y: value.translation.height))
-                                    dragOffset = .zero
+                                    viewModel?.endSelection()
+                                    isSelecting = false
                                 }
                         )
                         // DOUBLE TAP: Crea nodo
@@ -63,8 +78,10 @@ struct CanvasView: View {
                     // 3. WORLD CONTENT (Mondo Virtuale)
                     Group {
                         ZStack(alignment: .topLeading) {
+                            groupsLayer          // Gruppi (parentesi graffe) - sotto tutto
                             connectionsLayer
                             temporaryLinkLayer
+                            rubberBandLayer
                             nodesLayer
                         }
                     }
@@ -136,7 +153,7 @@ struct CanvasView: View {
         // Toolbar di formattazione - appare quando un nodo è selezionato (non in editing)
         .overlay(alignment: .top) {
             if let vm = viewModel,
-               vm.selectedNodeID != nil {
+               !vm.selectedNodeIDs.isEmpty {
                 TextFormattingToolbar(
                     onBold: { vm.applyBoldToSelectedNode() },
                     onItalic: { vm.applyItalicToSelectedNode() },
@@ -146,6 +163,28 @@ struct CanvasView: View {
                 .padding(.top, 20)
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .animation(.easeInOut(duration: 0.2), value: vm.selectedNodeID)
+            }
+        }
+        // Toolbar di raggruppamento - appare quando 2+ nodi sono selezionati
+        .overlay(alignment: .bottom) {
+            if let vm = viewModel,
+               vm.selectedNodeIDs.count >= 2,
+               !vm.isEditingNode {
+                GroupingToolbar(
+                    onGroupWithText: {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            _ = vm.createGroup()
+                        }
+                    },
+                    onGroupWithLink: {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            _ = vm.createGroupWithLink()
+                        }
+                    }
+                )
+                .padding(.bottom, 80)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: vm.selectedNodeIDs.count)
             }
         }
         .background(Color(NSColor.windowBackgroundColor)) // Sfondo app
@@ -167,6 +206,17 @@ struct CanvasView: View {
     
     // MARK: - Subviews Generators
     
+    /// Layer per le parentesi graffe dei gruppi (renderizzato sotto le connessioni)
+    private var groupsLayer: some View {
+        Group {
+            if let vm = viewModel {
+                ForEach(vm.groups, id: \.id) { group in
+                    GroupBraceView(group: group, viewModel: vm)
+                }
+            }
+        }
+    }
+    
     private var connectionsLayer: some View {
         Group {
             if let vm = viewModel {
@@ -185,6 +235,23 @@ struct CanvasView: View {
                     to: vm.tempDragPoint
                 )
                 .allowsHitTesting(false)
+            }
+        }
+    }
+    
+    /// Rettangolo di selezione rubber band (azzurro semi-trasparente)
+    private var rubberBandLayer: some View {
+        Group {
+            if let vm = viewModel, let rect = vm.selectionRect {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.15))
+                    .overlay(
+                        Rectangle()
+                            .stroke(Color.accentColor, lineWidth: 1)
+                    )
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
+                    .allowsHitTesting(false)
             }
         }
     }

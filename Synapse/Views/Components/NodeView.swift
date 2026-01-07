@@ -39,7 +39,7 @@ struct NodeView: View {
     var viewModel: MapViewModel
     
     var isSelected: Bool {
-        viewModel.selectedNodeID == node.id
+        viewModel.selectedNodeIDs.contains(node.id)
     }
     
     var isLinkingSource: Bool {
@@ -58,6 +58,7 @@ struct NodeView: View {
     @State private var isHovered: Bool = false
     @FocusState private var isTextFieldFocused: Bool
     @State private var dragStartPosition: CGPoint = .zero
+    @State private var lastDragTranslation: CGSize = .zero
     
     /// Riferimento alla NSTextView per word hit testing durante il linking
     @State private var textViewRef: NSTextView?
@@ -326,6 +327,7 @@ struct NodeView: View {
                 if isEditing { return }
                 let shiftPressed = NSEvent.modifierFlags.contains(.shift)
                 if shiftPressed {
+                    // LINKING MODE (Shift+Drag)
                     if !viewModel.isLinking {
                         // Determina se linkare le parole selezionate o la singola parola
                         switch hoverTarget {
@@ -349,16 +351,40 @@ struct NodeView: View {
                     }
                     viewModel.updateLinkingDrag(to: value.location)
                 } else {
+                    // DRAG MODE (spostamento nodi)
                     if viewModel.isLinking {
                         viewModel.cancelLinking()
                     }
-                    viewModel.updateNodePosition(node, to: value.location)
+                    
+                    // Inizializzazione drag
+                    if dragStartPosition == .zero {
+                        dragStartPosition = node.position
+                        lastDragTranslation = .zero
+                        
+                        // Se questo nodo non è già selezionato, seleziona SOLO lui
+                        if !viewModel.selectedNodeIDs.contains(node.id) {
+                            viewModel.selectedNodeIDs = [node.id]
+                        }
+                    }
+                    
+                    // Calcola delta incrementale (rispetto all'ultimo frame)
+                    let currentDelta = CGSize(
+                        width: value.translation.width - lastDragTranslation.width,
+                        height: value.translation.height - lastDragTranslation.height
+                    )
+                    lastDragTranslation = value.translation
+                    
+                    // Sposta tutti i nodi selezionati
+                    viewModel.moveSelectedNodes(delta: currentDelta)
                 }
             }
             .onEnded { value in
                 if viewModel.isLinking {
                     viewModel.endLinking(at: value.location)
                 }
+                // Reset stato drag
+                dragStartPosition = .zero
+                lastDragTranslation = .zero
             }
     }
     

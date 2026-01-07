@@ -23,10 +23,19 @@ class MapViewModel {
     /// Tutte le connessioni tra i nodi
     var connections: [SynapseConnection] = []
     
+    /// Tutti i gruppi visivi di nodi (parentesi graffe)
+    var groups: [SynapseGroup] = []
+    
     // MARK: - Stato Selezione
     
-    /// ID del nodo attualmente selezionato
-    var selectedNodeID: UUID?
+    /// ID dei nodi attualmente selezionati (multi-selezione)
+    var selectedNodeIDs: Set<UUID> = []
+    
+    /// Rettangolo di selezione attivo (rubber band), nil quando non in uso
+    var selectionRect: CGRect?
+    
+    /// Origine del rettangolo di selezione (punto iniziale del drag)
+    private var selectionOrigin: CGPoint?
     
     /// ID della connessione attualmente selezionata
     var selectedConnectionID: UUID?
@@ -35,10 +44,15 @@ class MapViewModel {
     /// Usato per comunicare a NodeView quando attivare la TextField
     var nodeToEditID: UUID?
     
-    /// Nodo selezionato (computed per retrocompatibilità)
+    /// Nodo selezionato (computed per retrocompatibilità - restituisce il primo del Set)
     var selectedNode: SynapseNode? {
-        guard let id = selectedNodeID else { return nil }
+        guard let id = selectedNodeIDs.first else { return nil }
         return nodes.first { $0.id == id }
+    }
+    
+    /// ID del nodo selezionato (retrocompatibilità per singola selezione)
+    var selectedNodeID: UUID? {
+        selectedNodeIDs.first
     }
     
     /// Connessione selezionata (computed)
@@ -142,7 +156,7 @@ class MapViewModel {
     
     // MARK: - Data Fetching
     
-    /// Carica tutti i nodi e le connessioni dal database.
+    /// Carica tutti i nodi, connessioni e gruppi dal database.
     func fetchData() {
         do {
             // Fetch dei nodi
@@ -152,6 +166,10 @@ class MapViewModel {
             // Fetch delle connessioni
             let connectionDescriptor = FetchDescriptor<SynapseConnection>()
             connections = try modelContext.fetch(connectionDescriptor)
+            
+            // Fetch dei gruppi
+            let groupDescriptor = FetchDescriptor<SynapseGroup>()
+            groups = try modelContext.fetch(groupDescriptor)
         } catch {
             print("Errore nel caricamento dati: \(error.localizedDescription)")
         }
@@ -175,13 +193,31 @@ class MapViewModel {
     
     // MARK: - Selezione
     
-    /// Seleziona un nodo per l'editing.
+    /// Seleziona un nodo (imposta solo questo nodo nel Set).
     /// Deseleziona automaticamente qualsiasi connessione.
-    /// - Parameter node: Il nodo da selezionare (nil per deselezionare)
+    /// - Parameter node: Il nodo da selezionare (nil per deselezionare tutto)
     func selectNode(_ node: SynapseNode?) {
-        selectedNodeID = node?.id
+        if let node = node {
+            selectedNodeIDs = [node.id]
+        } else {
+            selectedNodeIDs.removeAll()
+        }
         selectedConnectionID = nil
         focusedConnectionID = nil
+    }
+    
+    /// Aggiunge un nodo alla selezione corrente (multi-selezione additiva).
+    /// - Parameter node: Il nodo da aggiungere
+    func addNodeToSelection(_ node: SynapseNode) {
+        selectedNodeIDs.insert(node.id)
+        selectedConnectionID = nil
+        focusedConnectionID = nil
+    }
+    
+    /// Rimuove un nodo dalla selezione corrente.
+    /// - Parameter node: Il nodo da rimuovere
+    func removeNodeFromSelection(_ node: SynapseNode) {
+        selectedNodeIDs.remove(node.id)
     }
     
     /// Seleziona una connessione.
@@ -189,23 +225,25 @@ class MapViewModel {
     /// - Parameter connection: La connessione da selezionare
     func selectConnection(_ connection: SynapseConnection?) {
         selectedConnectionID = connection?.id
-        selectedNodeID = nil
+        selectedNodeIDs.removeAll()
     }
     
     /// Deseleziona tutto (nodi e connessioni).
     func deselectAll() {
-        selectedNodeID = nil
+        selectedNodeIDs.removeAll()
         selectedConnectionID = nil
         focusedConnectionID = nil
         nodeToEditID = nil
+        selectionRect = nil
+        selectionOrigin = nil
     }
     
-    /// Deseleziona il nodo corrente (retrocompatibilità).
+    /// Deseleziona tutti i nodi (retrocompatibilità).
     func deselectNode() {
-        selectedNodeID = nil
+        selectedNodeIDs.removeAll()
     }
     
-    /// Elimina l'elemento attualmente selezionato (nodo o connessione).
+    /// Elimina l'elemento attualmente selezionato (nodo/i o connessione).
     /// Chiamato quando l'utente preme Delete/Backspace.
     /// - Returns: true se è stato eliminato qualcosa
     @discardableResult
@@ -218,14 +256,96 @@ class MapViewModel {
             return true
         }
         
-        // Poi prova a eliminare il nodo selezionato
-        if let nodeID = selectedNodeID,
-           let node = nodes.first(where: { $0.id == nodeID }) {
-            deleteNode(node)
-            return true
+        // Poi prova a eliminare i nodi selezionati (multi-selezione)
+        if !selectedNodeIDs.isEmpty {
+            return deleteSelectedNodes()
         }
         
         return false
+    }
+    
+    /// Elimina tutti i nodi attualmente selezionati e le loro connessioni.
+    /// - Returns: true se almeno un nodo è stato eliminato
+    @discardableResult
+    func deleteSelectedNodes() -> Bool {
+        guard !selectedNodeIDs.isEmpty else { return false }
+        
+        // Copia gli ID perché il Set verrà modificato durante l'iterazione
+        let idsToDelete = selectedNodeIDs
+        
+        for nodeID in idsToDelete {
+            if let node = nodes.first(where: { $0.id == nodeID }) {
+                deleteNode(node)
+            }
+        }
+        
+        selectedNodeIDs.removeAll()
+        return true
+    }
+    
+    // MARK: - Rubber Band Selection
+    
+    /// Inizia la selezione rubber band.
+    /// - Parameters:
+    ///   - point: Punto iniziale in coordinate WORLD
+    ///   - additive: Se true (Shift premuto), aggiunge alla selezione esistente
+    func startSelection(at point: CGPoint, additive: Bool = false) {
+        if !additive {
+            selectedNodeIDs.removeAll()
+        }
+        selectionOrigin = point
+        selectionRect = CGRect(origin: point, size: .zero)
+    }
+    
+    /// Aggiorna la selezione rubber band calcolando quali nodi intersecano il rettangolo.
+    /// - Parameter point: Punto corrente in coordinate WORLD
+    func updateSelection(to point: CGPoint) {
+        guard let origin = selectionOrigin else { return }
+        
+        // Calcola il rettangolo (normalizzato per gestire drag in qualsiasi direzione)
+        let minX = min(origin.x, point.x)
+        let minY = min(origin.y, point.y)
+        let maxX = max(origin.x, point.x)
+        let maxY = max(origin.y, point.y)
+        
+        selectionRect = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        
+        // Trova tutti i nodi che intersecano il rettangolo
+        guard let rect = selectionRect else { return }
+        
+        var newSelection: Set<UUID> = []
+        for node in nodes {
+            let nodeRect = CGRect(
+                x: node.position.x - node.size.width / 2,
+                y: node.position.y - node.size.height / 2,
+                width: node.size.width,
+                height: node.size.height
+            )
+            if rect.intersects(nodeRect) {
+                newSelection.insert(node.id)
+            }
+        }
+        
+        selectedNodeIDs = newSelection
+    }
+    
+    /// Termina la selezione rubber band.
+    func endSelection() {
+        selectionRect = nil
+        selectionOrigin = nil
+    }
+    
+    // MARK: - Group Actions
+    
+    /// Sposta tutti i nodi selezionati del delta specificato.
+    /// - Parameter delta: Lo spostamento da applicare
+    func moveSelectedNodes(delta: CGSize) {
+        for nodeID in selectedNodeIDs {
+            if let node = nodes.first(where: { $0.id == nodeID }) {
+                node.position.x += delta.width
+                node.position.y += delta.height
+            }
+        }
     }
     
     /// Pulisce il flag di editing del nodo.
@@ -337,7 +457,7 @@ class MapViewModel {
     /// - Parameter connection: La connessione da editare
     func startEditingConnection(_ connection: SynapseConnection) {
         // Deseleziona eventuali nodi
-        selectedNodeID = nil
+        selectedNodeIDs.removeAll()
         nodeToEditID = nil
         
         // Seleziona e attiva editing sulla connessione
@@ -545,8 +665,23 @@ class MapViewModel {
     }
     
     /// Elimina un nodo e tutte le sue connessioni (cascade).
+    /// Se il nodo è il labelNode di un gruppo, elimina anche il gruppo (sync deletion).
     /// - Parameter node: Il nodo da eliminare
     func deleteNode(_ node: SynapseNode) {
+        // SYNC DELETION: Se questo nodo è il labelNode di un gruppo, elimina il gruppo
+        // Questo previene "Ghost Braces" che puntano a nodi inesistenti
+        if let groupToDelete = groups.first(where: { $0.labelNodeID == node.id }) {
+            deleteGroupOnly(groupToDelete)
+        }
+        
+        // Rimuovi il nodo dalla lista di membri di eventuali gruppi
+        for group in groups {
+            var members = group.memberNodeIDs
+            if members.remove(node.id) != nil {
+                group.memberNodeIDs = members
+            }
+        }
+        
         // Rimuovi dalla lista locale
         nodes.removeAll { $0.id == node.id }
         
@@ -558,9 +693,14 @@ class MapViewModel {
         modelContext.delete(node)
         
         // Deseleziona se era selezionato
-        if selectedNodeID == node.id {
-            selectedNodeID = nil
-        }
+        selectedNodeIDs.remove(node.id)
+    }
+    
+    /// Elimina solo l'entry del gruppo (senza eliminare il label node).
+    /// Usato internamente dal sync deletion.
+    private func deleteGroupOnly(_ group: SynapseGroup) {
+        groups.removeAll { $0.id == group.id }
+        modelContext.delete(group)
     }
     
     // MARK: - Operazioni sulle Connessioni
@@ -704,6 +844,221 @@ class MapViewModel {
     func pan(delta: CGPoint) {
         panOffset.x += delta.x
         panOffset.y += delta.y
+    }
+    
+    // MARK: - Smart Grouping
+    
+    /// Fattore per determinare l'orientamento del gruppo.
+    /// Se Height > Width * factor → verticale, altrimenti orizzontale.
+    private static let orientationFactor: CGFloat = 1.2
+    
+    /// Padding tra la parentesi e il label node.
+    private static let groupLabelPadding: CGFloat = 30
+    
+    /// Calcola il bounding box unificato dei nodi selezionati.
+    /// - Returns: CGRect contenente tutti i nodi selezionati, o nil se < 2 nodi selezionati
+    func computeSelectionBoundingBox() -> CGRect? {
+        guard selectedNodeIDs.count >= 2 else { return nil }
+        
+        let selectedNodes = nodes.filter { selectedNodeIDs.contains($0.id) }
+        guard selectedNodes.count >= 2 else { return nil }
+        
+        // Calcola il bounding box unificato
+        var minX = CGFloat.infinity
+        var minY = CGFloat.infinity
+        var maxX = -CGFloat.infinity
+        var maxY = -CGFloat.infinity
+        
+        for node in selectedNodes {
+            let left = node.position.x - node.size.width / 2
+            let right = node.position.x + node.size.width / 2
+            let top = node.position.y - node.size.height / 2
+            let bottom = node.position.y + node.size.height / 2
+            
+            minX = min(minX, left)
+            minY = min(minY, top)
+            maxX = max(maxX, right)
+            maxY = max(maxY, bottom)
+        }
+        
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+    
+    /// Calcola il bounding box per un gruppo specifico (dinamico, basato sui nodi membri correnti).
+    /// - Parameter group: Il gruppo di cui calcolare il bounding box
+    /// - Returns: CGRect contenente tutti i nodi membri, o nil se nessun membro esiste
+    func computeBoundingBox(for group: SynapseGroup) -> CGRect? {
+        let memberNodes = nodes.filter { group.memberNodeIDs.contains($0.id) }
+        guard !memberNodes.isEmpty else { return nil }
+        
+        var minX = CGFloat.infinity
+        var minY = CGFloat.infinity
+        var maxX = -CGFloat.infinity
+        var maxY = -CGFloat.infinity
+        
+        for node in memberNodes {
+            let left = node.position.x - node.size.width / 2
+            let right = node.position.x + node.size.width / 2
+            let top = node.position.y - node.size.height / 2
+            let bottom = node.position.y + node.size.height / 2
+            
+            minX = min(minX, left)
+            minY = min(minY, top)
+            maxX = max(maxX, right)
+            maxY = max(maxY, bottom)
+        }
+        
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+    
+    /// Determina l'orientamento della parentesi basandosi sul bounding box.
+    /// - Parameter boundingBox: Il bounding box della selezione
+    /// - Returns: Orientamento verticale se Height > Width * 1.2, altrimenti orizzontale
+    func determineGroupOrientation(boundingBox: CGRect) -> GroupOrientation {
+        if boundingBox.height > boundingBox.width * MapViewModel.orientationFactor {
+            return .vertical
+        } else {
+            return .horizontal
+        }
+    }
+    
+    /// Crea un nuovo gruppo dai nodi attualmente selezionati.
+    /// Crea automaticamente un label node alla punta della parentesi e lo mette in editing.
+    /// - Returns: Il gruppo creato, o nil se meno di 2 nodi sono selezionati
+    @discardableResult
+    func createGroup() -> SynapseGroup? {
+        guard let boundingBox = computeSelectionBoundingBox() else {
+            print("Impossibile creare gruppo: meno di 2 nodi selezionati")
+            return nil
+        }
+        
+        let orientation = determineGroupOrientation(boundingBox: boundingBox)
+        
+        // Calcola la posizione del label node alla punta della parentesi
+        let labelPosition: CGPoint
+        switch orientation {
+        case .vertical:
+            // Parentesi a destra: label node a destra del bounding box
+            labelPosition = CGPoint(
+                x: boundingBox.maxX + MapViewModel.groupLabelPadding + SynapseNode.defaultWidth / 2,
+                y: boundingBox.midY
+            )
+        case .horizontal:
+            // Parentesi in basso: label node sotto il bounding box
+            labelPosition = CGPoint(
+                x: boundingBox.midX,
+                y: boundingBox.maxY + MapViewModel.groupLabelPadding + SynapseNode.defaultHeight / 2
+            )
+        }
+        
+        // Crea il label node
+        let labelNode = SynapseNode(text: "", at: labelPosition)
+        modelContext.insert(labelNode)
+        nodes.append(labelNode)
+        
+        // Crea il gruppo
+        let group = SynapseGroup(
+            memberNodeIDs: selectedNodeIDs,
+            labelNodeID: labelNode.id,
+            orientation: orientation
+        )
+        modelContext.insert(group)
+        groups.append(group)
+        
+        // Deseleziona i nodi membri e seleziona il label node
+        selectedNodeIDs.removeAll()
+        selectNode(labelNode)
+        
+        // Attiva l'editing del label node dopo un breve delay per permettere il rendering
+        let nodeID = labelNode.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.nodeToEditID = nodeID
+        }
+        
+        return group
+    }
+    
+    /// Elimina un gruppo e il suo label node associato.
+    /// I nodi membri non vengono eliminati, solo il raggruppamento visivo.
+    /// - Parameter group: Il gruppo da eliminare
+    func deleteGroup(_ group: SynapseGroup) {
+        // Elimina il label node (che a sua volta eliminerà il gruppo tramite sync deletion)
+        if let labelNode = nodes.first(where: { $0.id == group.labelNodeID }) {
+            deleteNode(labelNode)
+        } else {
+            // Se il label node non esiste, elimina solo il gruppo
+            deleteGroupOnly(group)
+        }
+    }
+    
+    /// Trova il label node di un gruppo.
+    /// - Parameter group: Il gruppo
+    /// - Returns: Il nodo etichetta, o nil se non trovato
+    func labelNode(for group: SynapseGroup) -> SynapseNode? {
+        nodes.first { $0.id == group.labelNodeID }
+    }
+    
+    /// Crea un nuovo gruppo con un Anchor Node e avvia automaticamente il linking.
+    /// L'Anchor Node è visivamente minimale (piccolo) e senza testo.
+    /// Dopo la creazione, il sistema entra in modalità linking dall'anchor.
+    /// - Returns: Il gruppo creato, o nil se meno di 2 nodi sono selezionati
+    @discardableResult
+    func createGroupWithLink() -> SynapseGroup? {
+        guard let boundingBox = computeSelectionBoundingBox() else {
+            print("Impossibile creare gruppo: meno di 2 nodi selezionati")
+            return nil
+        }
+        
+        let orientation = determineGroupOrientation(boundingBox: boundingBox)
+        
+        // Calcola la posizione dell'anchor node alla punta della parentesi
+        let anchorPosition: CGPoint
+        switch orientation {
+        case .vertical:
+            // Parentesi a destra: anchor node a destra del bounding box
+            anchorPosition = CGPoint(
+                x: boundingBox.maxX + MapViewModel.groupLabelPadding + 15, // Più piccolo del label
+                y: boundingBox.midY
+            )
+        case .horizontal:
+            // Parentesi in basso: anchor node sotto il bounding box
+            anchorPosition = CGPoint(
+                x: boundingBox.midX,
+                y: boundingBox.maxY + MapViewModel.groupLabelPadding + 15
+            )
+        }
+        
+        // Crea l'anchor node (piccolo, senza testo)
+        // Usa dimensioni minime per renderlo visivamente minimale
+        let anchorNode = SynapseNode(
+            text: "",
+            x: anchorPosition.x,
+            y: anchorPosition.y,
+            width: 20,  // Anchor piccolo
+            height: 20
+        )
+        modelContext.insert(anchorNode)
+        nodes.append(anchorNode)
+        
+        // Crea il gruppo
+        let group = SynapseGroup(
+            memberNodeIDs: selectedNodeIDs,
+            labelNodeID: anchorNode.id,
+            orientation: orientation
+        )
+        modelContext.insert(group)
+        groups.append(group)
+        
+        // Deseleziona i nodi membri
+        selectedNodeIDs.removeAll()
+        
+        // Avvia automaticamente il linking dall'anchor node
+        // Piccolo delay per permettere il rendering
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.startLinking(from: anchorNode, wordRanges: nil, wordRect: nil)
+        }
+        
+        return group
     }
     
     // MARK: - Text Styling

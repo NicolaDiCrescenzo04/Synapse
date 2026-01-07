@@ -20,6 +20,7 @@ struct SynapseApp: App {
         let schema = Schema([
             SynapseNode.self,
             SynapseConnection.self,
+            SynapseGroup.self,
         ])
         let modelConfiguration = ModelConfiguration(
             schema: schema,
