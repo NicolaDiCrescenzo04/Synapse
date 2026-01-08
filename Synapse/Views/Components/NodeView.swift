@@ -118,11 +118,15 @@ struct NodeView: View {
             // Contenuto
             if isEditing {
                 // EDIT MODE
+                // FIX: Passa SEMPRE la larghezza del nodo così il testo rimane centrato durante la digitazione
+                // Prima passavamo nil per nodi non manuallySized, ma questo causava textContainer infinito
+                // e il testo appariva spostato a sinistra durante l'editing
+                let editorWidth = node.width - (horizontalPadding * 2) - 8
                 RichTextEditor(
                     data: $localRichTextData,
                     plainText: $localText,
                     isEditable: true,
-                    explicitWidth: node.isManuallySized ? node.width - (horizontalPadding * 2) - 8 : nil,
+                    explicitWidth: editorWidth,
                     shouldWrapText: node.isManuallySized,
                     onCommit: { finishEditing() },
                     onResolveEditor: { textView in

@@ -129,8 +129,24 @@ struct RichTextEditor: NSViewRepresentable {
             var frame = textView.frame
             frame.size.width = width
             textView.frame = frame
+        } else if let width = explicitWidth, width > 0 {
+            // EDITING MODE (non wrap): larghezza fissa per centering, ma contenuto può eccedere orizzontalmente
+            // Questo permette all'allineamento .center di funzionare durante la digitazione
+            textContainer.widthTracksTextView = false
+            textContainer.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            textView.isHorizontallyResizable = false  // textView non cresce, il centering funziona
+            textView.isVerticallyResizable = false
+            
+            // Imposta larghezza fissa
+            textView.minSize = NSSize(width: width, height: 0)
+            textView.maxSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            
+            // Forza la larghezza del frame
+            var frame = textView.frame
+            frame.size.width = width
+            textView.frame = frame
         } else {
-            // AUTO MODE: singola riga, cresce orizzontalmente
+            // AUTO MODE (VIEW): singola riga, cresce orizzontalmente
             textContainer.widthTracksTextView = false
             textContainer.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
             textView.isHorizontallyResizable = true

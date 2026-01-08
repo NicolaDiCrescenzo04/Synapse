@@ -892,7 +892,7 @@ class MapViewModel {
     
     /// Fattore per determinare l'orientamento del gruppo.
     /// Se Height > Width * factor → verticale, altrimenti orizzontale.
-    private static let orientationFactor: CGFloat = 1.2
+    private static let orientationFactor: CGFloat = 1.0
     
     /// Padding tra la parentesi e il label node.
     private static let groupLabelPadding: CGFloat = 30
@@ -953,13 +953,34 @@ class MapViewModel {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
     
-    /// Determina l'orientamento della parentesi basandosi sul bounding box.
-    /// - Parameter boundingBox: Il bounding box della selezione
-    /// - Returns: Orientamento verticale se Height > Width * 1.2, altrimenti orizzontale
-    func determineGroupOrientation(boundingBox: CGRect) -> GroupOrientation {
-        if boundingBox.height > boundingBox.width * MapViewModel.orientationFactor {
+    /// Determina l'orientamento della parentesi basandosi sulla disposizione dei centri dei nodi.
+    /// Analizza la "diffusione" delle posizioni dei nodi per capire se sono disposti
+    /// più verticalmente o orizzontalmente.
+    /// - Parameter selectedNodes: I nodi selezionati da analizzare
+    /// - Returns: Orientamento verticale se i nodi sono disposti più in verticale, altrimenti orizzontale
+    func determineGroupOrientation(for selectedNodes: [SynapseNode]) -> GroupOrientation {
+        guard selectedNodes.count >= 2 else { return .horizontal }
+        
+        // Calcola la diffusione dei CENTRI dei nodi (non del bounding box)
+        let positions = selectedNodes.map { $0.position }
+        
+        let minX = positions.map { $0.x }.min() ?? 0
+        let maxX = positions.map { $0.x }.max() ?? 0
+        let minY = positions.map { $0.y }.min() ?? 0
+        let maxY = positions.map { $0.y }.max() ?? 0
+        
+        let horizontalSpread = maxX - minX  // Quanto sono distribuiti in orizzontale
+        let verticalSpread = maxY - minY    // Quanto sono distribuiti in verticale
+        
+        print("🔍 DEBUG: Node positions spread - horizontal: \(horizontalSpread), vertical: \(verticalSpread)")
+        
+        // Se i nodi sono più distribuiti verticalmente → parentesi verticale (sul lato)
+        // Se i nodi sono più distribuiti orizzontalmente → parentesi orizzontale (in basso)
+        if verticalSpread > horizontalSpread * MapViewModel.orientationFactor {
+            print("🔍 DEBUG: → Returning .vertical (brace on side)")
             return .vertical
         } else {
+            print("🔍 DEBUG: → Returning .horizontal (brace on bottom)")
             return .horizontal
         }
     }
@@ -969,12 +990,13 @@ class MapViewModel {
     /// - Returns: Il gruppo creato, o nil se meno di 2 nodi sono selezionati
     @discardableResult
     func createGroup() -> SynapseGroup? {
-        guard let boundingBox = computeSelectionBoundingBox() else {
+        let selectedNodes = nodes.filter { selectedNodeIDs.contains($0.id) }
+        guard let boundingBox = computeSelectionBoundingBox(), selectedNodes.count >= 2 else {
             print("Impossibile creare gruppo: meno di 2 nodi selezionati")
             return nil
         }
         
-        let orientation = determineGroupOrientation(boundingBox: boundingBox)
+        let orientation = determineGroupOrientation(for: selectedNodes)
         
         // Calcola la posizione del label node alla punta della parentesi
         let labelPosition: CGPoint
@@ -1046,12 +1068,13 @@ class MapViewModel {
     /// - Returns: Il gruppo creato, o nil se meno di 2 nodi sono selezionati
     @discardableResult
     func createGroupWithLink() -> SynapseGroup? {
-        guard let boundingBox = computeSelectionBoundingBox() else {
+        let selectedNodes = nodes.filter { selectedNodeIDs.contains($0.id) }
+        guard let boundingBox = computeSelectionBoundingBox(), selectedNodes.count >= 2 else {
             print("Impossibile creare gruppo: meno di 2 nodi selezionati")
             return nil
         }
         
-        let orientation = determineGroupOrientation(boundingBox: boundingBox)
+        let orientation = determineGroupOrientation(for: selectedNodes)
         
         // Calcola la posizione dell'anchor node alla punta della parentesi
         let anchorPosition: CGPoint
