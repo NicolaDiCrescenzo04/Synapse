@@ -132,6 +132,26 @@ struct CanvasView: View {
                 .onDeleteCommand { handleDeleteCommand() }
                 .onKeyPress(.tab) { handleTab() }
                 .onKeyPress(.return) { handleReturn(geometry: geometry) }
+                // Undo/Redo: Cmd+Z / Cmd+Shift+Z
+                .onKeyPress(keys: [.init("z")]) { keyPress in
+                    guard keyPress.modifiers.contains(.command) else { return .ignored }
+                    guard let vm = viewModel else { return .ignored }
+                    // Non eseguire undo/redo se stiamo editando testo (NSTextView gestisce il suo undo)
+                    if vm.isEditingNode || vm.isEditingConnection { return .ignored }
+                    
+                    if keyPress.modifiers.contains(.shift) {
+                        // Cmd+Shift+Z = Redo
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            vm.redo()
+                        }
+                    } else {
+                        // Cmd+Z = Undo
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            vm.undo()
+                        }
+                    }
+                    return .handled
+                }
                 .onKeyPress(.escape) {
                     viewModel?.deselectAll()
                     isCanvasFocused = true

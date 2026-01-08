@@ -352,7 +352,7 @@ class FormattableTextView: NSTextView {
         centerVertically()
     }
     
-    /// Centra verticalmente il testo nella view.
+    /// Centra il testo sia orizzontalmente che verticalmente nella view.
     /// Funziona correttamente sia in modalità auto (singola riga) che manuale (testo a capo).
     /// Usa isUpdatingLayout per prevenire loop infiniti.
     private func centerVertically() {
@@ -368,25 +368,34 @@ class FormattableTextView: NSTextView {
         // Questo è cruciale per il testo a capo (wrapped text)
         layoutManager.ensureLayout(for: container)
         
-        // Ottieni l'altezza della view e del contenuto
+        // Ottieni le dimensioni della view e del contenuto
+        let viewWidth = self.bounds.width
         let viewHeight = self.bounds.height
-        let contentHeight = layoutManager.usedRect(for: container).height
+        let usedRect = layoutManager.usedRect(for: container)
+        let contentWidth = usedRect.width
+        let contentHeight = usedRect.height
         
-        // Se il contenuto è più piccolo della view, centra verticalmente
+        var newWidthInset: CGFloat = 0
+        var newHeightInset: CGFloat = 0
+        
+        // Centra orizzontalmente se il contenuto è più stretto della view
+        if contentWidth < viewWidth && contentWidth > 0 && viewWidth > 0 {
+            let leftInset = (viewWidth - contentWidth) / 2.0
+            newWidthInset = max(0, floor(leftInset))
+        }
+        
+        // Centra verticalmente se il contenuto è più corto della view
         if contentHeight < viewHeight && contentHeight > 0 && viewHeight > 0 {
             let topInset = (viewHeight - contentHeight) / 2.0
-            // Usa floor per evitare pixel blurry
-            let newInset = NSSize(width: 0, height: max(0, floor(topInset)))
-            
-            // Evita update loop: aggiorna solo se c'è una differenza significativa
-            if abs(textContainerInset.height - newInset.height) > 0.5 {
-                textContainerInset = newInset
-            }
-        } else {
-            // Contenuto più grande o uguale alla view: nessun inset
-            if textContainerInset.height != 0 {
-                textContainerInset = NSSize(width: 0, height: 0)
-            }
+            newHeightInset = max(0, floor(topInset))
+        }
+        
+        let newInset = NSSize(width: newWidthInset, height: newHeightInset)
+        
+        // Evita update loop: aggiorna solo se c'è una differenza significativa
+        if abs(textContainerInset.width - newInset.width) > 0.5 ||
+           abs(textContainerInset.height - newInset.height) > 0.5 {
+            textContainerInset = newInset
         }
     }
     

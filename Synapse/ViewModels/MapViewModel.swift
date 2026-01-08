@@ -145,12 +145,54 @@ class MapViewModel {
     /// Contesto SwiftData per la persistenza
     private var modelContext: ModelContext
     
+    // MARK: - Undo/Redo Support
+    
+    /// UndoManager per le operazioni sulla canvas (nodi, connessioni, gruppi)
+    /// Sfrutta l'integrazione nativa di SwiftData con UndoManager (macOS 14+)
+    var undoManager: UndoManager? {
+        modelContext.undoManager
+    }
+    
+    /// Indica se è possibile eseguire undo
+    var canUndo: Bool {
+        undoManager?.canUndo ?? false
+    }
+    
+    /// Indica se è possibile eseguire redo
+    var canRedo: Bool {
+        undoManager?.canRedo ?? false
+    }
+    
+    /// Esegue undo dell'ultima operazione
+    func undo() {
+        guard let undoManager = undoManager, undoManager.canUndo else { return }
+        undoManager.undo()
+        // Refresh dei dati dopo l'undo per sincronizzare la UI
+        fetchData()
+    }
+    
+    /// Esegue redo dell'operazione precedentemente annullata
+    func redo() {
+        guard let undoManager = undoManager, undoManager.canRedo else { return }
+        undoManager.redo()
+        // Refresh dei dati dopo il redo per sincronizzare la UI
+        fetchData()
+    }
+    
     // MARK: - Inizializzatore
     
     /// Crea un nuovo MapViewModel con il contesto SwiftData specificato.
+    /// Configura automaticamente un UndoManager per supportare undo/redo.
     /// - Parameter modelContext: Il contesto per le operazioni di persistenza
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
+        
+        // Configura UndoManager se non già presente
+        // SwiftData registra automaticamente le modifiche ai modelli nell'undo stack
+        if modelContext.undoManager == nil {
+            modelContext.undoManager = UndoManager()
+        }
+        
         fetchData()
     }
     
