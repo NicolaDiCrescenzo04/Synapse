@@ -145,6 +145,9 @@ class MapViewModel {
     /// Contesto SwiftData per la persistenza
     private var modelContext: ModelContext
     
+    /// Servizio per il calcolo automatico delle posizioni dei nodi
+    private let layoutService = NodeLayoutService()
+    
     // MARK: - Undo/Redo Support
     
     /// UndoManager per le operazioni sulla canvas (nodi, connessioni, gruppi)
@@ -544,8 +547,10 @@ class MapViewModel {
     }
     
     /// Crea un nuovo nodo CONNESSO al nodo selezionato (tasto TAB).
-    /// Il nuovo nodo viene posizionato a destra del nodo selezionato.
-    /// Crea automaticamente una connessione e attiva l'editing.
+    /// Usa NodeLayoutService per calcolare la posizione ottimale:
+    /// - Root Balance: bilancia figli a sinistra/destra se il genitore è la root
+    /// - Flow Rule: continua nella direzione del ramo esistente
+    /// - Y-Axis Spacing: evita collisioni considerando i subtree
     /// - Returns: Il nuovo nodo creato, o nil se nessun nodo è selezionato
     @discardableResult
     func createConnectedNode() -> SynapseNode? {
@@ -554,29 +559,51 @@ class MapViewModel {
             return nil
         }
         
-        // Calcola la posizione del nuovo nodo (a destra del source)
-        let newPosition = CGPoint(
-            x: sourceNode.position.x + connectedNodeOffsetX,
-            y: sourceNode.position.y
+        // Trova i figli esistenti del sourceNode (fratelli del nuovo nodo)
+        let siblings = sourceNode.outgoingConnections.compactMap { $0.target }
+        
+        // Calcola la posizione ottimale usando NodeLayoutService
+        let layoutResult = layoutService.calculateChildPosition(
+            parentNode: sourceNode,
+            siblings: siblings,
+            nodeSize: CGSize(width: SynapseNode.defaultWidth, height: SynapseNode.defaultHeight),
+            allNodes: nodes,
+            connections: connections
         )
         
-        // Crea il nuovo nodo
-        let newNode = SynapseNode(text: "", at: newPosition)
+        // Crea il nuovo nodo alla posizione calcolata
+        let newNode = SynapseNode(text: "", at: layoutResult.position)
         modelContext.insert(newNode)
         nodes.append(newNode)
         
         // Crea la connessione dal source al nuovo nodo
         let _ = createConnection(from: sourceNode, to: newNode, label: "")
         
+        // Applica il rebalancing se necessario
+        if layoutResult.needsRebalancing {
+            layoutService.applyRebalancing(
+                result: layoutResult,
+                parentNode: sourceNode,
+                children: siblings + [newNode]
+            )
+        }
+        
+        // Applica Trident Layout: centra il genitore rispetto ai suoi figli
+        let isSourceRoot = sourceNode.incomingConnections.isEmpty
+        layoutService.applyTridentLayout(parentNode: sourceNode, isRoot: isSourceRoot)
+        
+        // Risolvi eventuali collisioni con altri nodi
+        layoutService.resolveCollisionsForNewNode(newNode: newNode, allNodes: nodes)
+        
+        // Risolvi collisioni tra fratelli sullo stesso livello
+        let allSiblings = siblings + [newNode]
+        layoutService.resolveSiblingCollisions(siblings: allSiblings, allNodes: nodes)
+        
         // Seleziona il nuovo nodo
         selectNode(newNode)
         
         // Imposta il flag per attivare l'editing
-        // (permette alla UI di renderizzare il nodo prima di attivare il focus)
         let nodeID = newNode.id
-        // EDUCATIONAL: [weak self] previene memory leak se il ViewModel viene deallocato
-        // prima che il blocco async venga eseguito sul main thread.
-        // FIX: Delay di 100ms per permettere a SwiftUI di renderizzare il nuovo nodo
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.nodeToEditID = nodeID
         }
@@ -585,9 +612,9 @@ class MapViewModel {
     }
     
     /// Crea un nuovo nodo FRATELLO vicino al nodo selezionato (tasto ENTER).
-    /// Se il nodo selezionato ha un genitore, il nuovo nodo viene collegato allo stesso genitore.
-    /// Altrimenti viene creato isolato.
-    /// La posizione viene calcolata per evitare sovrapposizioni.
+    /// Se il nodo selezionato ha un genitore, il nuovo nodo viene collegato allo stesso genitore
+    /// usando NodeLayoutService per il posizionamento intelligente.
+    /// Altrimenti viene creato isolato sotto il nodo selezionato.
     /// - Returns: Il nuovo nodo creato, o nil se nessun nodo è selezionato
     @discardableResult
     func createSiblingNode() -> SynapseNode? {
@@ -597,62 +624,95 @@ class MapViewModel {
         }
         
         // 1. Identifica il genitore comune (il nodo che punta al sourceNode)
-        // Se ci sono più connessioni in entrata, prendiamo la prima come "genitore principale"
         let parentNode = sourceNode.incomingConnections.first?.source
         
-        // 2. Calcola posizione evitando sovrapposizioni
-        // Partiamo dalla posizione sotto il sourceNode
-        let startX = sourceNode.position.x
-        var checkY = sourceNode.position.y + siblingNodeOffsetY
-        
-        // Usiamo un raggio di collisione basato sulle dimensioni tipiche del nodo
-        // (Height 70, spaziatura 100 -> raggio 40-50 è sicuro, usiamo 80 per margine largo)
-        let avoidanceRadius: CGFloat = 80.0
-        
-        // Funzione locale per verificare collisioni
-        func positionIsOccupied(_ point: CGPoint) -> Bool {
-            for node in nodes {
-                // Ignoriamo noi stessi (non ancora creati) e il sourceNode
-                if node.id == sourceNode.id { continue }
-                
-                let dist = hypot(point.x - node.position.x, point.y - node.position.y)
-                if dist < avoidanceRadius {
-                    return true
-                }
-            }
-            return false
-        }
-        
-        // Cerca slot libero scorrendo verso il basso
-        var attempts = 0
-        while positionIsOccupied(CGPoint(x: startX, y: checkY)) && attempts < 50 {
-            checkY += siblingNodeOffsetY
-            attempts += 1
-        }
-        
-        let newPosition = CGPoint(x: startX, y: checkY)
-        
-        // 3. Crea il nuovo nodo
-        let newNode = SynapseNode(text: "", at: newPosition)
-        modelContext.insert(newNode)
-        nodes.append(newNode)
-        
-        // 4. Se esiste un genitore, crea la connessione (così diventano fratelli visuali E logici)
+        // 2. Se esiste un genitore, usa NodeLayoutService per posizionamento intelligente
         if let parent = parentNode {
+            // Trova i fratelli esistenti (figli del parent, incluso sourceNode)
+            let siblings = parent.outgoingConnections.compactMap { $0.target }
+            
+            // Calcola la posizione ottimale usando NodeLayoutService
+            let layoutResult = layoutService.calculateChildPosition(
+                parentNode: parent,
+                siblings: siblings,
+                nodeSize: CGSize(width: SynapseNode.defaultWidth, height: SynapseNode.defaultHeight),
+                allNodes: nodes,
+                connections: connections
+            )
+            
+            // Crea il nuovo nodo alla posizione calcolata
+            let newNode = SynapseNode(text: "", at: layoutResult.position)
+            modelContext.insert(newNode)
+            nodes.append(newNode)
+            
+            // Crea la connessione dal parent al nuovo nodo
             _ = createConnection(from: parent, to: newNode, label: "")
+            
+            // Applica il rebalancing se necessario
+            if layoutResult.needsRebalancing {
+                layoutService.applyRebalancing(
+                    result: layoutResult,
+                    parentNode: parent,
+                    children: siblings + [newNode]
+                )
+            }
+            
+            // Applica Trident Layout: centra il genitore rispetto ai suoi figli
+            let isParentRoot = parent.incomingConnections.isEmpty
+            layoutService.applyTridentLayout(parentNode: parent, isRoot: isParentRoot)
+            
+            // Risolvi eventuali collisioni con altri nodi
+            layoutService.resolveCollisionsForNewNode(newNode: newNode, allNodes: nodes)
+            
+            // Risolvi collisioni tra fratelli sullo stesso livello
+            let allSiblings = siblings + [newNode]
+            layoutService.resolveSiblingCollisions(siblings: allSiblings, allNodes: nodes)
+            
+            // Seleziona il nuovo nodo e attiva editing
+            selectNode(newNode)
+            
+            let nodeID = newNode.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.nodeToEditID = nodeID
+            }
+            
+            return newNode
+        } else {
+            // 3. Nessun genitore: crea nodo isolato sotto il sourceNode
+            // Usa logica semplice di collision avoidance
+            let startX = sourceNode.position.x
+            var checkY = sourceNode.position.y + siblingNodeOffsetY
+            
+            let avoidanceRadius: CGFloat = 80.0
+            
+            func positionIsOccupied(_ point: CGPoint) -> Bool {
+                for node in nodes {
+                    if node.id == sourceNode.id { continue }
+                    let dist = hypot(point.x - node.position.x, point.y - node.position.y)
+                    if dist < avoidanceRadius { return true }
+                }
+                return false
+            }
+            
+            var attempts = 0
+            while positionIsOccupied(CGPoint(x: startX, y: checkY)) && attempts < 50 {
+                checkY += siblingNodeOffsetY
+                attempts += 1
+            }
+            
+            let newNode = SynapseNode(text: "", at: CGPoint(x: startX, y: checkY))
+            modelContext.insert(newNode)
+            nodes.append(newNode)
+            
+            selectNode(newNode)
+            
+            let nodeID = newNode.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.nodeToEditID = nodeID
+            }
+            
+            return newNode
         }
-        
-        // 5. Seleziona il nuovo nodo e attiva editing
-        selectNode(newNode)
-        
-        let nodeID = newNode.id
-        // EDUCATIONAL: [weak self] è necessario nelle closure asincrone per evitare retain cycles.
-        // FIX: Delay di 100ms per permettere a SwiftUI di renderizzare il nuovo nodo
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.nodeToEditID = nodeID
-        }
-        
-        return newNode
     }
     
     /// Crea un nuovo nodo al centro della canvas (tasto ENTER senza selezione).
