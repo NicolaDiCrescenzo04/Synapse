@@ -330,6 +330,7 @@ struct NodeView: View {
     
     private func handleDoubleTap() {
         viewModel.selectNode(node)
+        // Editing inline (ripristinato)
         startEditing()
     }
     

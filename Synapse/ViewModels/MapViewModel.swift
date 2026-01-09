@@ -1379,6 +1379,206 @@ class MapViewModel {
             print("Errore salvataggio rich text: \(error)")
         }
     }
+    
+    // MARK: - Extended Styling Methods
+    
+    /// Applica strikethrough (barrato)
+    func applyStrikethroughToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.toggleStrikethrough()
+            return
+        }
+        guard let node = selectedNode else { return }
+        toggleStrikethrough(on: node)
+    }
+    
+    /// Applica un colore dalla palette al testo
+    func applyTextColorToSelectedNode(_ color: FormattableTextView.TextColorPalette) {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.applyTextColorFromPalette(color)
+            return
+        }
+        guard let node = selectedNode else { return }
+        applyTextColor(color.color, to: node)
+    }
+    
+    /// Applica un colore highlight dalla palette
+    func applyHighlightToSelectedNode(_ color: FormattableTextView.HighlightColorPalette) {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.applyHighlightFromPalette(color)
+            return
+        }
+        guard let node = selectedNode else { return }
+        applyHighlightColor(color.color, to: node)
+    }
+    
+    /// Allinea a sinistra
+    func applyAlignLeftToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.setTextAlignment(.left)
+            return
+        }
+        guard let node = selectedNode else { return }
+        applyAlignment(.left, to: node)
+    }
+    
+    /// Centra il testo
+    func applyAlignCenterToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.setTextAlignment(.center)
+            return
+        }
+        guard let node = selectedNode else { return }
+        applyAlignment(.center, to: node)
+    }
+    
+    /// Allinea a destra
+    func applyAlignRightToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.setTextAlignment(.right)
+            return
+        }
+        guard let node = selectedNode else { return }
+        applyAlignment(.right, to: node)
+    }
+    
+    /// Aumenta indentazione
+    func increaseIndentToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.increaseIndent()
+            return
+        }
+        guard let node = selectedNode else { return }
+        modifyNodeIndent(node, delta: 20)
+    }
+    
+    /// Diminuisce indentazione
+    func decreaseIndentToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            textView.decreaseIndent()
+            return
+        }
+        guard let node = selectedNode else { return }
+        modifyNodeIndent(node, delta: -20)
+    }
+    
+    /// Aumenta dimensione font
+    func increaseFontSizeToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            // Usa setFontSize con valore incrementato
+            let currentSize = textView.font?.pointSize ?? 14
+            textView.setFontSize(min(72, currentSize + 2))
+            return
+        }
+        guard let node = selectedNode else { return }
+        modifyNodeFontSize(node, delta: 2)
+    }
+    
+    /// Diminuisce dimensione font
+    func decreaseFontSizeToSelectedNode() {
+        if isEditingNode, let textView = activeTextView as? FormattableTextView {
+            let currentSize = textView.font?.pointSize ?? 14
+            textView.setFontSize(max(8, currentSize - 2))
+            return
+        }
+        guard let node = selectedNode else { return }
+        modifyNodeFontSize(node, delta: -2)
+    }
+    
+    // MARK: - Extended Styling Helpers
+    
+    private func toggleStrikethrough(on node: SynapseNode) {
+        guard let attributedString = getAttributedString(from: node) else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        var hasStrike = false
+        
+        attributedString.enumerateAttribute(.strikethroughStyle, in: fullRange, options: []) { value, _, _ in
+            if let style = value as? Int, style != 0 { hasStrike = true }
+        }
+        
+        let newStyle = hasStrike ? 0 : NSUnderlineStyle.single.rawValue
+        attributedString.addAttribute(.strikethroughStyle, value: newStyle, range: fullRange)
+        
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    private func applyTextColor(_ color: NSColor, to node: SynapseNode) {
+        guard let attributedString = getAttributedString(from: node) else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        attributedString.addAttribute(.foregroundColor, value: color, range: fullRange)
+        
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    private func applyHighlightColor(_ color: NSColor?, to node: SynapseNode) {
+        guard let attributedString = getAttributedString(from: node) else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        if let color = color {
+            attributedString.addAttribute(.backgroundColor, value: color, range: fullRange)
+        } else {
+            attributedString.removeAttribute(.backgroundColor, range: fullRange)
+        }
+        
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    private func applyAlignment(_ alignment: NSTextAlignment, to node: SynapseNode) {
+        guard let attributedString = getAttributedString(from: node) else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = alignment
+        attributedString.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+        
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    private func modifyNodeIndent(_ node: SynapseNode, delta: CGFloat) {
+        guard let attributedString = getAttributedString(from: node) else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        
+        attributedString.enumerateAttribute(.paragraphStyle, in: fullRange, options: []) { value, attrRange, _ in
+            let current = (value as? NSParagraphStyle) ?? .default
+            let mutable = current.mutableCopy() as! NSMutableParagraphStyle
+            mutable.headIndent = max(0, mutable.headIndent + delta)
+            mutable.firstLineHeadIndent = max(0, mutable.firstLineHeadIndent + delta)
+            attributedString.addAttribute(.paragraphStyle, value: mutable, range: attrRange)
+        }
+        
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    private func modifyNodeFontSize(_ node: SynapseNode, delta: CGFloat) {
+        guard let attributedString = getAttributedString(from: node) else { return }
+        
+        let fullRange = NSRange(location: 0, length: attributedString.length)
+        
+        attributedString.enumerateAttribute(.font, in: fullRange, options: []) { value, attrRange, _ in
+            let currentFont = (value as? NSFont) ?? .systemFont(ofSize: 14)
+            let newSize = max(8, min(72, currentFont.pointSize + delta))
+            let newFont = NSFontManager.shared.convert(currentFont, toSize: newSize)
+            attributedString.addAttribute(.font, value: newFont, range: attrRange)
+        }
+        
+        saveAttributedString(attributedString, to: node)
+    }
+    
+    /// Helper per ottenere un NSMutableAttributedString da un nodo
+    private func getAttributedString(from node: SynapseNode) -> NSMutableAttributedString? {
+        if let data = node.richTextData,
+           let existing = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
+            return NSMutableAttributedString(attributedString: existing)
+        } else if !node.text.isEmpty {
+            return NSMutableAttributedString(string: node.text, attributes: [
+                .font: NSFont.systemFont(ofSize: 14)
+            ])
+        }
+        return nil
+    }
 }
 
 

@@ -669,6 +669,165 @@ class FormattableTextView: NSTextView {
         delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: self))
     }
     
+    // MARK: - Color Palette
+    
+    /// Palette colori predefinita per il testo (5+ colori)
+    enum TextColorPalette: CaseIterable {
+        case black
+        case red
+        case orange
+        case green
+        case blue
+        case purple
+        
+        var color: NSColor {
+            switch self {
+            case .black: return .labelColor
+            case .red: return NSColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 1.0)
+            case .orange: return NSColor(red: 0.95, green: 0.5, blue: 0.1, alpha: 1.0)
+            case .green: return NSColor(red: 0.2, green: 0.7, blue: 0.3, alpha: 1.0)
+            case .blue: return NSColor(red: 0.2, green: 0.4, blue: 0.9, alpha: 1.0)
+            case .purple: return NSColor(red: 0.6, green: 0.3, blue: 0.8, alpha: 1.0)
+            }
+        }
+        
+        var name: String {
+            switch self {
+            case .black: return "Default"
+            case .red: return "Rosso"
+            case .orange: return "Arancione"
+            case .green: return "Verde"
+            case .blue: return "Blu"
+            case .purple: return "Viola"
+            }
+        }
+    }
+    
+    /// Palette colori per evidenziazione (highlight)
+    enum HighlightColorPalette: CaseIterable {
+        case none
+        case yellow
+        case green
+        case blue
+        case pink
+        case orange
+        
+        var color: NSColor? {
+            switch self {
+            case .none: return nil
+            case .yellow: return NSColor(red: 1.0, green: 0.95, blue: 0.5, alpha: 0.7)
+            case .green: return NSColor(red: 0.6, green: 0.95, blue: 0.6, alpha: 0.7)
+            case .blue: return NSColor(red: 0.6, green: 0.8, blue: 1.0, alpha: 0.7)
+            case .pink: return NSColor(red: 1.0, green: 0.7, blue: 0.8, alpha: 0.7)
+            case .orange: return NSColor(red: 1.0, green: 0.8, blue: 0.5, alpha: 0.7)
+            }
+        }
+        
+        var name: String {
+            switch self {
+            case .none: return "Nessuno"
+            case .yellow: return "Giallo"
+            case .green: return "Verde"
+            case .blue: return "Blu"
+            case .pink: return "Rosa"
+            case .orange: return "Arancione"
+            }
+        }
+    }
+    
+    // MARK: - Extended Formatting Actions
+    
+    /// Toggle strikethrough sulla selezione
+    @objc func toggleStrikethrough() {
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
+        
+        // Verifica se il range ha già strikethrough
+        var hasStrike = false
+        storage.enumerateAttribute(.strikethroughStyle, in: range, options: []) { value, _, _ in
+            if let style = value as? Int, style != 0 {
+                hasStrike = true
+            }
+        }
+        
+        // Toggle strikethrough
+        let newStyle: Int = hasStrike ? 0 : NSUnderlineStyle.single.rawValue
+        storage.addAttribute(.strikethroughStyle, value: newStyle, range: range)
+        notifyTextChange()
+    }
+    
+    /// Applica un colore di evidenziazione (background) dalla palette
+    @objc func applyHighlightColor(_ color: NSColor?) {
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
+        
+        if let color = color {
+            storage.addAttribute(.backgroundColor, value: color, range: range)
+        } else {
+            storage.removeAttribute(.backgroundColor, range: range)
+        }
+        notifyTextChange()
+    }
+    
+    /// Applica un colore testo dalla palette
+    func applyTextColorFromPalette(_ paletteColor: TextColorPalette) {
+        applyColor(paletteColor.color)
+    }
+    
+    /// Applica un colore highlight dalla palette
+    func applyHighlightFromPalette(_ paletteColor: HighlightColorPalette) {
+        applyHighlightColor(paletteColor.color)
+    }
+    
+    /// Aumenta l'indentazione del paragrafo
+    @objc func increaseIndent() {
+        modifyParagraphStyle { style in
+            style.headIndent += 20
+            style.firstLineHeadIndent += 20
+        }
+    }
+    
+    /// Diminuisce l'indentazione del paragrafo
+    @objc func decreaseIndent() {
+        modifyParagraphStyle { style in
+            style.headIndent = max(0, style.headIndent - 20)
+            style.firstLineHeadIndent = max(0, style.firstLineHeadIndent - 20)
+        }
+    }
+    
+    /// Imposta l'allineamento del testo
+    @objc func setTextAlignment(_ alignment: NSTextAlignment) {
+        modifyParagraphStyle { style in
+            style.alignment = alignment
+        }
+    }
+    
+    /// Helper per modificare lo stile del paragrafo
+    private func modifyParagraphStyle(_ modifier: (NSMutableParagraphStyle) -> Void) {
+        let range = effectiveRange
+        guard range.length > 0, let storage = textStorage else { return }
+        
+        // Se non c'è attributo paragraphStyle, applichiamo il default modificato
+        var hasStyle = false
+        storage.enumerateAttribute(.paragraphStyle, in: range, options: []) { value, attrRange, _ in
+            hasStyle = true
+            let current = (value as? NSParagraphStyle) ?? .default
+            let mutable = current.mutableCopy() as! NSMutableParagraphStyle
+            modifier(mutable)
+            storage.addAttribute(.paragraphStyle, value: mutable, range: attrRange)
+        }
+        
+        // Se nessuno stile trovato, crea uno nuovo
+        if !hasStyle {
+            let mutable = NSMutableParagraphStyle()
+            modifier(mutable)
+            storage.addAttribute(.paragraphStyle, value: mutable, range: range)
+        }
+        
+        notifyTextChange()
+    }
+
+    
     // MARK: - Word Hit Testing
     
     /// Risultato del word hit testing

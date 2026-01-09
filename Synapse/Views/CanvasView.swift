@@ -178,8 +178,12 @@ struct CanvasView: View {
                     onBold: { vm.applyBoldToSelectedNode() },
                     onItalic: { vm.applyItalicToSelectedNode() },
                     onUnderline: { vm.applyUnderlineToSelectedNode() },
-                    onRed: { vm.applyRedColorToSelectedNode() },
-                    onLatex: { vm.insertLatexDelimiters() }
+                    onStrikethrough: { vm.applyStrikethroughToSelectedNode() },
+                    onLatex: { vm.insertLatexDelimiters() },
+                    onTextColor: { color in vm.applyTextColorToSelectedNode(color) },
+                    onHighlight: { color in vm.applyHighlightToSelectedNode(color) },
+                    onFontSizeIncrease: { vm.increaseFontSizeToSelectedNode() },
+                    onFontSizeDecrease: { vm.decreaseFontSizeToSelectedNode() }
                 )
                 .padding(.top, 20)
                 .transition(.move(edge: .top).combined(with: .opacity))

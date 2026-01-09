@@ -3,64 +3,73 @@
 //  Synapse
 //
 //  Barra degli strumenti flottante per la formattazione del testo.
-//  Usa SwiftUI Button per garantire che i click vengano catturati correttamente.
+//  Versione COMPLETA con tutti i controlli di formattazione rich text.
 //
 
 import SwiftUI
 import AppKit
 
-// Protocollo per definire i selettori custom della nostra FormattableTextView
+// MARK: - Protocollo per FormattableTextView
+
 @objc protocol FormattableTextActions {
     func toggleBold(_ sender: Any?)
     func toggleItalic(_ sender: Any?)
     func underline(_ sender: Any?)
 }
 
+// MARK: - TextFormattingToolbar
+
 struct TextFormattingToolbar: View {
     
-    // MARK: - Callbacks
+    // MARK: - Callbacks Base
     
-    /// Callback per applicare il grassetto
     var onBold: () -> Void
-    
-    /// Callback per applicare il corsivo
     var onItalic: () -> Void
-    
-    /// Callback per applicare la sottolineatura
     var onUnderline: () -> Void
-    
-    /// Callback per applicare il colore rosso
-    var onRed: () -> Void
-    
-    /// Callback per inserire delimitatori LaTeX
+    var onStrikethrough: () -> Void
     var onLatex: () -> Void
+    
+    // MARK: - Callbacks Colori
+    
+    var onTextColor: (FormattableTextView.TextColorPalette) -> Void
+    var onHighlight: (FormattableTextView.HighlightColorPalette) -> Void
+    
+    // MARK: - Callbacks Font Size
+    
+    var onFontSizeIncrease: () -> Void
+    var onFontSizeDecrease: () -> Void
+    
+    // MARK: - State
+    
+    @State private var selectedTextColor: FormattableTextView.TextColorPalette = .black
+    @State private var selectedHighlight: FormattableTextView.HighlightColorPalette = .none
     
     // MARK: - Body
     
     var body: some View {
         HStack(spacing: 4) {
-            // Bold - Usa NonFocusableButton per non rubare focus dalla NSTextView
-            NonFocusableButton(iconName: "bold", help: "Grassetto", action: onBold)
-            
-            // Italic
-            NonFocusableButton(iconName: "italic", help: "Corsivo", action: onItalic)
-            
-            // Underline
-            NonFocusableButton(iconName: "underline", help: "Sottolineato", action: onUnderline)
+            // Font Size Controls
+            fontSizeControls
             
             Divider()
                 .frame(height: 16)
             
-            // Red Color - Toggle rosso/nero
-            NonFocusableButton(iconName: "paintbrush.fill", help: "Rosso (Toggle)", tintColor: .systemRed, action: onRed)
+            // Style Buttons (B, I, U, S) con keyboard shortcuts
+            styleButtons
             
             Divider()
                 .frame(height: 16)
             
-            // LaTeX - Inserisce delimitatori $$
+            // Color Menus
+            colorMenus
+            
+            Divider()
+                .frame(height: 16)
+            
+            // LaTeX
             NonFocusableButton(iconName: "sum", help: "LaTeX ($$)", action: onLatex)
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(Color(.windowBackgroundColor).opacity(0.95))
         .cornerRadius(8)
@@ -69,37 +78,141 @@ struct TextFormattingToolbar: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(.separatorColor), lineWidth: 0.5)
         )
+        // Keyboard Shortcuts
+        .background(keyboardShortcuts)
     }
-}
-
-// MARK: - Toolbar Button (SwiftUI Native)
-
-/// Pulsante semplice per la toolbar usando SwiftUI Button nativo.
-/// Evita problemi di hit testing con NSButton wrapper.
-struct ToolbarButton: View {
-    let iconName: String
-    let help: String
-    var color: Color = .primary
-    let action: () -> Void
     
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: iconName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(color)
-                .font(.system(size: 12, weight: .medium))
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
+    // MARK: - Keyboard Shortcuts (Hidden Buttons)
+    
+    @ViewBuilder
+    private var keyboardShortcuts: some View {
+        // Hidden buttons that capture keyboard shortcuts
+        HStack(spacing: 0) {
+            Button("Bold") { onBold() }
+                .keyboardShortcut("b", modifiers: .command)
+                .hidden()
+            
+            Button("Italic") { onItalic() }
+                .keyboardShortcut("i", modifiers: .command)
+                .hidden()
+            
+            Button("Underline") { onUnderline() }
+                .keyboardShortcut("u", modifiers: .command)
+                .hidden()
         }
-        .buttonStyle(.plain)
-        .help(help)
+        .frame(width: 0, height: 0)
+    }
+    
+    // MARK: - Font Size Controls
+    
+    @ViewBuilder
+    private var fontSizeControls: some View {
+        HStack(spacing: 2) {
+            NonFocusableButton(iconName: "minus", help: "Riduci Font", action: onFontSizeDecrease)
+            
+            Text("A")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            
+            NonFocusableButton(iconName: "plus", help: "Aumenta Font", action: onFontSizeIncrease)
+        }
+    }
+    
+    // MARK: - Style Buttons
+    
+    @ViewBuilder
+    private var styleButtons: some View {
+        HStack(spacing: 2) {
+            NonFocusableButton(iconName: "bold", help: "Grassetto (⌘B)", action: onBold)
+            NonFocusableButton(iconName: "italic", help: "Corsivo (⌘I)", action: onItalic)
+            NonFocusableButton(iconName: "underline", help: "Sottolineato (⌘U)", action: onUnderline)
+            NonFocusableButton(iconName: "strikethrough", help: "Barrato", action: onStrikethrough)
+        }
+    }
+    
+    // MARK: - Color Menus
+    
+    @ViewBuilder
+    private var colorMenus: some View {
+        HStack(spacing: 4) {
+            // Text Color Menu - Icona palette colori
+            Menu {
+                ForEach(FormattableTextView.TextColorPalette.allCases, id: \.self) { color in
+                    Button {
+                        selectedTextColor = color
+                        onTextColor(color)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "circle.fill")
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(Color(nsColor: color.color))
+                                .font(.system(size: 10))
+                            Text(color.name)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "paintpalette")
+                        .font(.system(size: 11))
+                    Circle()
+                        .fill(Color(nsColor: selectedTextColor.color))
+                        .frame(width: 8, height: 8)
+                }
+                .frame(width: 36, height: 24)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(4)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Colore Testo")
+            
+            // Highlight Color Menu
+            Menu {
+                ForEach(FormattableTextView.HighlightColorPalette.allCases, id: \.self) { color in
+                    Button {
+                        selectedHighlight = color
+                        onHighlight(color)
+                    } label: {
+                        HStack(spacing: 8) {
+                            if let c = color.color {
+                                Image(systemName: "circle.fill")
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(Color(nsColor: c))
+                                    .font(.system(size: 10))
+                            } else {
+                                Image(systemName: "circle.slash")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(color.name)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "highlighter")
+                        .font(.system(size: 11))
+                    if let hlColor = selectedHighlight.color {
+                        Circle()
+                            .fill(Color(nsColor: hlColor))
+                            .frame(width: 8, height: 8)
+                    }
+                }
+                .frame(width: 36, height: 24)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(4)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Evidenziatore")
+        }
     }
 }
 
-// MARK: - Non-Focusable Button (Legacy - kept for reference)
+// MARK: - NonFocusableButton
 
-/// Wrapper NSViewRepresentable che crea un pulsante che non ruba il focus dalla NSTextView.
-/// Questo è fondamentale per permettere la formattazione del testo senza uscire dall'edit mode.
+/// NSButton wrapper che non ruba il focus dalla NSTextView durante l'editing.
 struct NonFocusableButton: NSViewRepresentable {
     let iconName: String
     let help: String
@@ -109,12 +222,10 @@ struct NonFocusableButton: NSViewRepresentable {
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton()
         
-        // Configurazione immagine SF Symbol
         if let image = NSImage(systemSymbolName: iconName, accessibilityDescription: help) {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
             var finalImage = image.withSymbolConfiguration(config) ?? image
             
-            // Applica tintColor se specificato
             if let color = tintColor {
                 finalImage = finalImage.tinted(with: color)
             }
@@ -122,20 +233,14 @@ struct NonFocusableButton: NSViewRepresentable {
             button.image = finalImage
         }
         
-        // Stile del pulsante
         button.bezelStyle = .accessoryBarAction
         button.isBordered = false
         button.imagePosition = .imageOnly
         button.toolTip = help
-        
-        // CRUCIALE: Non accettare il first responder per non rubare il focus
         button.refusesFirstResponder = true
-        
-        // Imposta target e action
         button.target = context.coordinator
         button.action = #selector(Coordinator.buttonClicked(_:))
         
-        // Dimensioni
         button.widthAnchor.constraint(equalToConstant: 24).isActive = true
         button.heightAnchor.constraint(equalToConstant: 24).isActive = true
         
@@ -143,12 +248,10 @@ struct NonFocusableButton: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: NSButton, context: Context) {
-        // Aggiorna l'immagine se necessario
         if let image = NSImage(systemSymbolName: iconName, accessibilityDescription: help) {
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
             var finalImage = image.withSymbolConfiguration(config) ?? image
             
-            // Applica tintColor se specificato
             if let color = tintColor {
                 finalImage = finalImage.tinted(with: color)
             }
@@ -177,8 +280,6 @@ struct NonFocusableButton: NSViewRepresentable {
 // MARK: - NSImage Tinting Extension
 
 extension NSImage {
-    /// Crea una copia dell'immagine con il colore specificato come tinta.
-    /// Usato per colorare le icone SF Symbol.
     func tinted(with color: NSColor) -> NSImage {
         let image = self.copy() as! NSImage
         image.lockFocus()
