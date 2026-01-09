@@ -454,6 +454,16 @@ struct NodeView: View {
             .onEnded { value in
                 if viewModel.isLinking {
                     viewModel.endLinking(at: value.location)
+                } else {
+                    // Controlla se il nodo ha cambiato lato e specchia il subtree
+                    viewModel.checkAndMirrorSubtreeIfNeeded(
+                        node: node,
+                        previousX: dragStartPosition.x
+                    )
+                    
+                    // Drag terminato: applica l'aggiornamento ibrido del layout
+                    // Questo ricentra i genitori e risolve le collisioni
+                    viewModel.applyHybridLayoutAfterDrag(node: node)
                 }
                 // Reset stato drag
                 dragStartPosition = .zero

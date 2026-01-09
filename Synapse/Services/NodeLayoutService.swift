@@ -401,11 +401,15 @@ class NodeLayoutService {
         }
     }
     
-    /// Sposta un nodo e tutto il suo subtree di un delta Y
+    /// Sposta un nodo e tutto il suo subtree di un delta Y.
+    /// **Rispetta isPinned**: I nodi pinnati NON vengono spostati.
     private func moveSubtree(node: SynapseNode, deltaY: CGFloat) {
-        node.y += deltaY
+        // Se il nodo è pinnato, NON spostarlo (user intent ha la priorità)
+        if !node.isPinned {
+            node.y += deltaY
+        }
         
-        // Sposta anche tutti i figli ricorsivamente
+        // Sposta anche tutti i figli ricorsivamente (se non pinnati)
         for connection in node.outgoingConnections {
             if let child = connection.target {
                 moveSubtree(node: child, deltaY: deltaY)
@@ -618,6 +622,7 @@ class NodeLayoutService {
     
     /// Applica il Trident Layout: centra il genitore rispetto ai suoi figli.
     /// Se il genitore è la Root, invece di spostare la Root, sposta tutti i figli.
+    /// **Rispetta isPinned**: Se il genitore è pinnato, NON viene spostato (ma si usa comunque per calcoli).
     ///
     /// - Parameters:
     ///   - parentNode: Il nodo genitore
@@ -634,14 +639,17 @@ class NodeLayoutService {
             for child in children {
                 moveSubtree(node: child, deltaY: -deltaY)
             }
-        } else {
-            // Sposta il genitore alla posizione centrata
+        } else if !parentNode.isPinned {
+            // Nodo normale NON pinnato: sposta il genitore alla posizione centrata
             parentNode.y = targetY
         }
+        // Se parentNode.isPinned == true: non spostare il genitore (user intent)
+        // ma il calcolo è comunque fatto per altri usi
     }
     
     /// Applica il Trident Layout ricorsivamente a tutto l'albero.
     /// Utile dopo aver aggiunto molti nodi per ribilanciare tutto.
+    /// **Rispetta isPinned**: I nodi pinnati non vengono spostati.
     ///
     /// - Parameter rootNode: La radice dell'albero
     func applyTridentLayoutRecursively(rootNode: SynapseNode) {
@@ -654,6 +662,258 @@ class NodeLayoutService {
         // Poi applica a questo nodo
         let isRoot = rootNode.incomingConnections.isEmpty
         applyTridentLayout(parentNode: rootNode, isRoot: isRoot)
+    }
+    
+    // MARK: - Hybrid Layout Update (Responsive Layout)
+    
+    /// Esegue un aggiornamento ibrido del layout dopo che un nodo è stato spostato.
+    /// Questo metodo è ottimizzato per essere chiamato dopo ogni drag gesture.
+    ///
+    /// **Gerarchia di Priorità:**
+    /// 1. Anti-Collision: I nodi non si sovrappongono mai
+    /// 2. Manual Positioning: I nodi pinnati mantengono la loro posizione
+    /// 3. Algorithmic Layout: I nodi non pinnati si riposizionano per centrare i genitori
+    ///
+    /// - Parameters:
+    ///   - movedNode: Il nodo che è stato spostato dall'utente
+    ///   - allNodes: Tutti i nodi nella mappa
+    func applyHybridLayoutUpdate(movedNode: SynapseNode, allNodes: [SynapseNode]) {
+        // 1. Ricentra i genitori rispetto ai figli (incluso il nodo spostato)
+        //    Risali l'albero dal nodo spostato fino alla root
+        var currentNode = movedNode
+        while let parentConnection = currentNode.incomingConnections.first,
+              let parent = parentConnection.source {
+            let isRoot = parent.incomingConnections.isEmpty
+            applyTridentLayout(parentNode: parent, isRoot: isRoot)
+            currentNode = parent
+        }
+        
+        // 2. Risolvi collisioni per tutti i fratelli del nodo spostato
+        if let parentConnection = movedNode.incomingConnections.first,
+           let parent = parentConnection.source {
+            let siblings = findChildren(of: parent)
+            resolveSiblingCollisions(siblings: siblings, allNodes: allNodes)
+        }
+        
+        // 3. Risolvi eventuali collisioni globali causate dallo spostamento
+        resolveCollisionsForNewNode(newNode: movedNode, allNodes: allNodes)
+    }
+    
+    // MARK: - Subtree Mirroring (Side Change Detection)
+    
+    /// Rileva se un nodo ha attraversato la linea centrale (root X) e specchia il subtree.
+    /// Chiamato dopo che un nodo è stato trascinato per verificare se è cambiato lato.
+    ///
+    /// - Parameters:
+    ///   - movedNode: Il nodo che è stato spostato
+    ///   - previousX: La posizione X precedente del nodo (prima del drag)
+    ///   - allNodes: Tutti i nodi nella mappa
+    func checkAndMirrorSubtreeIfSideChanged(
+        movedNode: SynapseNode,
+        previousX: CGFloat,
+        allNodes: [SynapseNode]
+    ) {
+        // Trova la root position
+        let rootPosition = findRootPosition(from: movedNode)
+        
+        // Determina il lato precedente e attuale
+        let wasOnLeft = previousX < rootPosition.x
+        let isNowOnLeft = movedNode.x < rootPosition.x
+        
+        // Se il lato è cambiato, specchia tutto il subtree
+        if wasOnLeft != isNowOnLeft {
+            mirrorSubtree(node: movedNode, rootX: rootPosition.x)
+        }
+    }
+    
+    /// Specchia un nodo e tutto il suo subtree rispetto alla posizione X della root.
+    /// Tutti i figli vengono riposizionati sul lato opposto.
+    ///
+    /// **Formula:**
+    /// `newX = rootX + (rootX - oldX)` oppure `newX = 2 * rootX - oldX`
+    ///
+    /// - Parameters:
+    ///   - node: Il nodo radice del subtree da specchiare
+    ///   - rootX: La coordinata X della root (asse di simmetria)
+    func mirrorSubtree(node: SynapseNode, rootX: CGFloat) {
+        // Specchia solo i figli, non il nodo stesso (che è già stato spostato dall'utente)
+        for connection in node.outgoingConnections {
+            if let child = connection.target {
+                mirrorNodeAndDescendants(node: child, rootX: rootX)
+            }
+        }
+    }
+    
+    /// Specchia un nodo e tutti i suoi discendenti rispetto a rootX.
+    /// Funzione ricorsiva interna.
+    private func mirrorNodeAndDescendants(node: SynapseNode, rootX: CGFloat) {
+        // Formula di specchiatura: newX = 2 * rootX - oldX
+        let newX = 2 * rootX - node.x
+        node.x = newX
+        
+        // Ricorsivamente specchia tutti i figli
+        for connection in node.outgoingConnections {
+            if let child = connection.target {
+                mirrorNodeAndDescendants(node: child, rootX: rootX)
+            }
+        }
+    }
+    
+    // MARK: - Edge Routing (Avoid Node Intersections)
+    
+    /// Genera un path Bézier che evita di passare attraverso altri nodi.
+    /// Se il percorso diretto interseca un nodo, la curva viene deviata per aggirarlo.
+    ///
+    /// - Parameters:
+    ///   - sourceCenter: Centro del nodo sorgente
+    ///   - targetCenter: Centro del nodo destinazione
+    ///   - sourceSize: Dimensioni del nodo sorgente
+    ///   - targetSize: Dimensioni del nodo destinazione
+    ///   - allNodes: Tutti i nodi nella mappa (per collision detection)
+    ///   - sourceNode: Il nodo sorgente (per escluderlo dal collision check)
+    ///   - targetNode: Il nodo target (per escluderlo dal collision check)
+    /// - Returns: Path Bézier che evita le intersezioni con altri nodi
+    func createRoutedConnectionPath(
+        from sourceCenter: CGPoint,
+        to targetCenter: CGPoint,
+        sourceSize: CGSize,
+        targetSize: CGSize,
+        allNodes: [SynapseNode],
+        sourceNode: SynapseNode,
+        targetNode: SynapseNode
+    ) -> Path {
+        var path = Path()
+        
+        // Calcola la direzione
+        let direction = targetCenter.x > sourceCenter.x ? LayoutDirection.right : .left
+        
+        // Calcola i punti di ancoraggio ai bordi dei nodi
+        let startPoint: CGPoint
+        let endPoint: CGPoint
+        
+        switch direction {
+        case .right:
+            startPoint = CGPoint(x: sourceCenter.x + sourceSize.width / 2, y: sourceCenter.y)
+            endPoint = CGPoint(x: targetCenter.x - targetSize.width / 2, y: targetCenter.y)
+        case .left:
+            startPoint = CGPoint(x: sourceCenter.x - sourceSize.width / 2, y: sourceCenter.y)
+            endPoint = CGPoint(x: targetCenter.x + targetSize.width / 2, y: targetCenter.y)
+        }
+        
+        // Trova nodi che potrebbero interferire con il percorso
+        let obstructingNodes = findObstructingNodes(
+            from: startPoint,
+            to: endPoint,
+            allNodes: allNodes,
+            excludeNodes: [sourceNode, targetNode]
+        )
+        
+        if obstructingNodes.isEmpty {
+            // Nessun ostacolo: usa il path standard
+            return createDynamicConnectionPath(
+                from: sourceCenter,
+                to: targetCenter,
+                sourceSize: sourceSize,
+                targetSize: targetSize
+            )
+        }
+        
+        // Calcola il bypass: devia la curva sopra o sotto gli ostacoli
+        let bypassY = calculateBypassY(
+            startY: startPoint.y,
+            endY: endPoint.y,
+            obstructingNodes: obstructingNodes
+        )
+        
+        // Crea un path con un punto intermedio per bypassare gli ostacoli
+        let midX = (startPoint.x + endPoint.x) / 2
+        let controlOffset = abs(endPoint.x - startPoint.x) * 0.3
+        
+        switch direction {
+        case .right:
+            let cp1 = CGPoint(x: startPoint.x + controlOffset, y: startPoint.y)
+            let midPoint = CGPoint(x: midX, y: bypassY)
+            let cp2 = CGPoint(x: midX - controlOffset * 0.5, y: bypassY)
+            let cp3 = CGPoint(x: midX + controlOffset * 0.5, y: bypassY)
+            let cp4 = CGPoint(x: endPoint.x - controlOffset, y: endPoint.y)
+            
+            path.move(to: startPoint)
+            path.addQuadCurve(to: midPoint, control: cp1)
+            path.addQuadCurve(to: endPoint, control: cp4)
+            
+        case .left:
+            let cp1 = CGPoint(x: startPoint.x - controlOffset, y: startPoint.y)
+            let cp4 = CGPoint(x: endPoint.x + controlOffset, y: endPoint.y)
+            
+            path.move(to: startPoint)
+            path.addQuadCurve(to: CGPoint(x: midX, y: bypassY), control: cp1)
+            path.addQuadCurve(to: endPoint, control: cp4)
+        }
+        
+        return path
+    }
+    
+    /// Trova i nodi che ostruiscono il percorso diretto tra due punti
+    private func findObstructingNodes(
+        from start: CGPoint,
+        to end: CGPoint,
+        allNodes: [SynapseNode],
+        excludeNodes: [SynapseNode]
+    ) -> [SynapseNode] {
+        let excludeIDs = Set(excludeNodes.map { $0.id })
+        
+        // Bounding box del percorso diretto (con un po' di margine)
+        let minX = min(start.x, end.x)
+        let maxX = max(start.x, end.x)
+        let minY = min(start.y, end.y) - 20
+        let maxY = max(start.y, end.y) + 20
+        
+        return allNodes.filter { node in
+            // Escludi source e target
+            guard !excludeIDs.contains(node.id) else { return false }
+            
+            // Controlla se il nodo è nel corridoio del percorso
+            let nodeMinX = node.x - node.width / 2
+            let nodeMaxX = node.x + node.width / 2
+            let nodeMinY = node.y - node.height / 2
+            let nodeMaxY = node.y + node.height / 2
+            
+            let xOverlap = nodeMaxX > minX && nodeMinX < maxX
+            let yOverlap = nodeMaxY > minY && nodeMinY < maxY
+            
+            return xOverlap && yOverlap
+        }
+    }
+    
+    /// Calcola la Y del bypass per evitare gli ostacoli
+    private func calculateBypassY(
+        startY: CGFloat,
+        endY: CGFloat,
+        obstructingNodes: [SynapseNode]
+    ) -> CGFloat {
+        // Trova i bounds verticali degli ostacoli
+        var minObstacleY = CGFloat.infinity
+        var maxObstacleY = -CGFloat.infinity
+        
+        for node in obstructingNodes {
+            let nodeTop = node.y - node.height / 2
+            let nodeBottom = node.y + node.height / 2
+            minObstacleY = min(minObstacleY, nodeTop)
+            maxObstacleY = max(maxObstacleY, nodeBottom)
+        }
+        
+        // Scegli se passare sopra o sotto gli ostacoli
+        let avgY = (startY + endY) / 2
+        let distanceToTop = abs(avgY - minObstacleY)
+        let distanceToBottom = abs(avgY - maxObstacleY)
+        
+        if distanceToTop < distanceToBottom {
+            // Passa sopra
+            return minObstacleY - 30
+        } else {
+            // Passa sotto
+            return maxObstacleY + 30
+        }
     }
     
     // MARK: - Dynamic Edge Curvature (Prevents Overlapping Arrows)

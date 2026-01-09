@@ -56,6 +56,12 @@ final class SynapseNode {
     /// Se false, il nodo auto-si adatta al contenuto (single-line, cresce orizzontalmente).
     var isManuallySized: Bool = false
     
+    /// Indica se il nodo è stato posizionato manualmente dall'utente (pinned/locked).
+    /// Se true, l'algoritmo di layout NON modifica la posizione di questo nodo.
+    /// Tuttavia, il nodo viene comunque considerato per calcolare il centro del suo genitore.
+    /// Viene impostato a true automaticamente quando l'utente trascina il nodo.
+    var isPinned: Bool = false
+    
     // MARK: - Costanti
     
     /// Larghezza minima del nodo

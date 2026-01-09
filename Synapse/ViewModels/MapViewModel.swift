@@ -740,12 +740,47 @@ class MapViewModel {
     
     /// Aggiorna la posizione di un nodo durante il drag.
     /// Chiamato in tempo reale durante il gesture.
+    /// **IMPORTANTE**: Imposta isPinned=true per indicare che l'utente ha posizionato manualmente il nodo.
     /// - Parameters:
     ///   - node: Il nodo da spostare
     ///   - newPoint: La nuova posizione
     func updateNodePosition(_ node: SynapseNode, to newPoint: CGPoint) {
         node.position = newPoint
+        
+        // Marca il nodo come "pinnato" (posizionato manualmente dall'utente)
+        // L'algoritmo di layout non lo sposterà automaticamente
+        node.isPinned = true
+        
         // SwiftData persiste automaticamente grazie all'autosave
+    }
+    
+    /// Applica l'aggiornamento ibrido del layout dopo che un nodo è stato trascinato.
+    /// Questo ricentra i genitori rispetto ai figli (incluso il nodo spostato)
+    /// e risolve eventuali collisioni.
+    ///
+    /// **Gerarchia di Priorità:**
+    /// 1. Anti-Collision: I nodi non si sovrappongono mai
+    /// 2. Manual Positioning: I nodi pinnati (isPinned=true) mantengono la loro posizione
+    /// 3. Algorithmic Layout: I nodi non pinnati si riposizionano per centrare i genitori
+    ///
+    /// - Parameter node: Il nodo che è stato trascinato dall'utente
+    func applyHybridLayoutAfterDrag(node: SynapseNode) {
+        layoutService.applyHybridLayoutUpdate(movedNode: node, allNodes: nodes)
+    }
+    
+    /// Controlla se un nodo ha attraversato la linea centrale (root X) e specchia il subtree.
+    /// Se il nodo è passato dalla parte destra a quella sinistra (o viceversa),
+    /// tutti i suoi figli vengono specchiati rispetto alla posizione della root.
+    ///
+    /// - Parameters:
+    ///   - node: Il nodo che è stato spostato
+    ///   - previousX: La posizione X del nodo prima del drag
+    func checkAndMirrorSubtreeIfNeeded(node: SynapseNode, previousX: CGFloat) {
+        layoutService.checkAndMirrorSubtreeIfSideChanged(
+            movedNode: node,
+            previousX: previousX,
+            allNodes: nodes
+        )
     }
     
     /// Aggiorna il testo di un nodo.
