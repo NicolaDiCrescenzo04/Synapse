@@ -86,6 +86,10 @@ struct NodeView: View {
     /// Flag per tracciare se siamo in modalità resize
     @State private var isResizing: Bool = false
     
+    /// Flag per saltare i callback di altezza subito dopo finishEditing
+    /// Evita che RichTextEditor sovrascriva l'altezza calcolata da autoResizeToFitText
+    @State private var skipHeightCallback: Bool = false
+    
     /// Altezza dinamica riportata dal RichTextEditor (per manual wrap mode)
     @State private var reportedContentHeight: CGFloat = 0
     
@@ -118,10 +122,9 @@ struct NodeView: View {
             // Contenuto
             if isEditing {
                 // EDIT MODE
-                // FIX: Passa SEMPRE la larghezza del nodo così il testo rimane centrato durante la digitazione
-                // Prima passavamo nil per nodi non manuallySized, ma questo causava textContainer infinito
-                // e il testo appariva spostato a sinistra durante l'editing
-                let editorWidth = node.width - (horizontalPadding * 2) - 8
+                // Usa la stessa formula di view mode per coerenza
+                // alignment=.center richiede un container con larghezza finita
+                let editorWidth = node.width - (horizontalPadding * 2)
                 RichTextEditor(
                     data: $localRichTextData,
                     plainText: $localText,
@@ -151,11 +154,12 @@ struct NodeView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .allowsHitTesting(false)
                 } else if localRichTextData != nil && !localText.isEmpty {
+                    // VIEW MODE: layout semplice, centering orizzontale gestito da NSTextView
                     RichTextEditor(
                         data: $localRichTextData,
                         plainText: $localText,
                         isEditable: false,
-                        explicitWidth: node.isManuallySized ? node.width - (horizontalPadding * 2) - 8 : nil,
+                        explicitWidth: node.width - (horizontalPadding * 2),
                         shouldWrapText: node.isManuallySized,
                         onResolveEditor: { textView in
                             textViewRef = textView
@@ -164,16 +168,17 @@ struct NodeView: View {
                             handleContentHeightChange(height)
                         }
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)
-                    // Permetti hit testing per word-level linking
                     .allowsHitTesting(false)
                 } else {
+                    // VIEW MODE: placeholder text
                     RichTextEditor(
                         data: .constant(nil),
                         plainText: .constant(localText.isEmpty ? "..." : localText),
                         isEditable: false,
-                        explicitWidth: node.isManuallySized ? node.width - (horizontalPadding * 2) - 8 : nil,
+                        explicitWidth: node.width - (horizontalPadding * 2),
                         shouldWrapText: node.isManuallySized,
                         onResolveEditor: { textView in
                             textViewRef = textView
@@ -182,6 +187,7 @@ struct NodeView: View {
                             handleContentHeightChange(height)
                         }
                     )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)
                     .opacity(localText.isEmpty ? 0.5 : 1.0)
@@ -337,20 +343,33 @@ struct NodeView: View {
     
     private func finishEditing() {
         guard isEditing else { return }
+        
+        // Attiva il flag PRIMA di cambiare isEditing
+        // Questo blocca tutti i callback in arrivo, inclusi quelli con isEditing=true in coda
+        skipHeightCallback = true
+        
         isEditing = false
         viewModel.isEditingNode = false
-        // IMPORTANTE: Resetta activeTextView per permettere alla toolbar di funzionare in node-mode
+        // Resetta activeTextView per permettere alla toolbar di funzionare in node-mode
         viewModel.activeTextView = nil
         viewModel.updateNodeRichText(node, richTextData: localRichTextData, plainText: localText)
         
-        // Auto-resize: adatta la larghezza al testo
-        autoResizeToFitText()
+        // Delay minimo per permettere ai callback in coda di essere processati e skippati
+        // Poi esegui autoResizeToFitText per impostare l'altezza corretta
+        DispatchQueue.main.async { [self] in
+            autoResizeToFitText()
+            
+            // Resetta il flag dopo un ulteriore delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                skipHeightCallback = false
+            }
+        }
     }
     
-    /// Calcola la larghezza necessaria per il testo e aggiorna node.width
+    /// Calcola la larghezza e altezza necessarie per il testo e aggiorna node.width/height
     /// NOTA: Non fa nulla se il nodo è in modalità manual (isManuallySized = true)
     private func autoResizeToFitText() {
-        // In manual mode, la larghezza è fissa - non fare auto-resize
+        // In manual mode, le dimensioni sono fisse - non fare auto-resize
         guard !node.isManuallySized else { return }
         
         let text = localText.isEmpty ? "..." : localText
@@ -363,9 +382,13 @@ struct NodeView: View {
             attributes: attributes
         )
         
-        // Larghezza = testo + padding (8 per lato = 16 totale) + margine extra
-        let requiredWidth = ceil(textSize.width) + (horizontalPadding * 2) + 16
+        // Larghezza = testo + padding orizzontale + margine extra per evitare clipping
+        let requiredWidth = ceil(textSize.width) + (horizontalPadding * 2) + 32
         node.width = max(SynapseNode.minWidth, requiredWidth)
+        
+        // RESET ALTEZZA: Adatta l'altezza al contenuto finale
+        let requiredHeight = ceil(textSize.height) + (verticalPadding * 2) + 4
+        node.height = max(SynapseNode.minHeight, requiredHeight)
     }
     
     // MARK: - Gesture Combinata
@@ -597,27 +620,34 @@ struct NodeView: View {
     }
     
     /// Gestisce i cambiamenti di altezza del contenuto riportati da RichTextEditor
-    /// IMPORTANTE: Solo ESPANDE l'altezza quando il contenuto ne richiede di più,
-    /// non riduce MAI sotto l'altezza impostata manualmente dall'utente.
+    /// DYNAMIC AUTO-GROWING: Espande l'altezza in tempo reale durante l'editing
+    /// per mantenere il cursore sempre visibile.
+    /// - In editing mode: espande sempre per seguire il contenuto
+    /// - In manual mode (non editing): espande solo se necessario, non riduce mai
     private func handleContentHeightChange(_ contentHeight: CGFloat) {
         // NON modificare l'altezza durante il resize attivo dell'utente
         guard !isResizing else { return }
         
-        // Auto-height solo in manual mode
-        guard node.isManuallySized else { return }
+        // Salta i callback subito dopo finishEditing per non sovrascrivere autoResizeToFitText
+        guard !skipHeightCallback else { return }
         
-        // Calcola l'altezza richiesta (contenuto + padding)
-        let requiredHeight = contentHeight + (verticalPadding * 2) + 8
-        
-        // SOLO ESPANDERE: aggiorna SOLO se il contenuto richiede PIÙ spazio
-        // Non ridurre mai sotto l'altezza attuale (impostata dall'utente)
+        // Calcola l'altezza richiesta (contenuto + padding minimo)
+        // NOTA: contentHeight già include +4 per glyph descendents (da RichTextEditor)
+        let requiredHeight = contentHeight + (verticalPadding * 2)
         let minRequiredHeight = max(SynapseNode.minHeight, requiredHeight)
         
-        if minRequiredHeight > node.height {
-            // Il contenuto ha bisogno di più spazio - espandi
-            node.height = minRequiredHeight
+        if isEditing {
+            // EDITING MODE: Aggiorna l'altezza in tempo reale per seguire il contenuto
+            if minRequiredHeight > node.height {
+                node.height = minRequiredHeight
+            }
+        } else if node.isManuallySized {
+            // MANUAL MODE (non editing): SOLO ESPANDERE, mai ridurre
+            if minRequiredHeight > node.height {
+                node.height = minRequiredHeight
+            }
         }
-        // Se minRequiredHeight <= node.height, NON fare nulla - mantieni la height manuale
+        // In auto mode (non manual, non editing): non modificare l'altezza
     }
     
     // MARK: - Context Menu

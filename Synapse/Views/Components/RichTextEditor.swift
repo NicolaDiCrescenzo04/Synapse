@@ -67,7 +67,13 @@ struct RichTextEditor: NSViewRepresentable {
         
         // Font e allineamento di default
         textView.font = .systemFont(ofSize: 14)
-        textView.alignment = .center 
+        
+        // Imposta il defaultParagraphStyle PRIMA di qualsiasi contenuto
+        // Questo garantisce che qualsiasi testo digitato erediti l'allineamento centrato
+        let centeredParagraphStyle = NSMutableParagraphStyle()
+        centeredParagraphStyle.alignment = .center
+        textView.defaultParagraphStyle = centeredParagraphStyle
+        textView.alignment = .center
         
         // Configurazione container basata sulla modalità wrap
         configureTextContainer(textView: textView)
@@ -81,8 +87,11 @@ struct RichTextEditor: NSViewRepresentable {
         } else {
             textView.string = plainText
             textView.font = .systemFont(ofSize: 14)
-            textView.alignment = .center
         }
+        
+        // Forza l'allineamento centrato DOPO aver caricato il contenuto
+        // Il paragrafo style nell'attributedString potrebbe avere un allineamento diverso
+        forceCenterAlignment(textView: textView)
         
         // Configura i typing attributes con allineamento centrato
         textView.setupCenteredTypingAttributes()
@@ -91,11 +100,9 @@ struct RichTextEditor: NSViewRepresentable {
         scrollView.documentView = textView
         
         // Espone SEMPRE la textView al viewmodel (necessario per word hit testing in hover)
-        // EDUCATIONAL: Usiamo [weak textView] perché la textView potrebbe essere
-        // deallocata prima che il blocco async venga eseguito (es. se la view viene
-        // rimossa dalla gerarchia). Con weak, il blocco semplicemente non fa nulla.
         DispatchQueue.main.async { [weak textView] in
             guard let textView = textView else { return }
+            
             // Espone la textView al viewmodel per word hit testing
             onResolveEditor?(textView)
             // Auto-focus solo se è in modalità editing
@@ -130,12 +137,12 @@ struct RichTextEditor: NSViewRepresentable {
             frame.size.width = width
             textView.frame = frame
         } else if let width = explicitWidth, width > 0 {
-            // EDITING MODE (non wrap): larghezza fissa per centering, ma contenuto può eccedere orizzontalmente
-            // Questo permette all'allineamento .center di funzionare durante la digitazione
-            textContainer.widthTracksTextView = false
+            // EDITING MODE (non wrap): larghezza fissa per centering
+            textContainer.widthTracksTextView = false  // Container usa larghezza esplicita
+            textContainer.heightTracksTextView = false // Permette espansione verticale
             textContainer.containerSize = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
-            textView.isHorizontallyResizable = false  // textView non cresce, il centering funziona
-            textView.isVerticallyResizable = false
+            textView.isHorizontallyResizable = false   // textView non cresce orizzontalmente
+            textView.isVerticallyResizable = true      // textView cresce verticalmente
             
             // Imposta larghezza fissa
             textView.minSize = NSSize(width: width, height: 0)
@@ -156,18 +163,54 @@ struct RichTextEditor: NSViewRepresentable {
             textView.minSize = NSSize(width: 0, height: 0)
             textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         }
+        
+        // CRITICAL FIX: Forza SEMPRE l'allineamento centrato dopo la configurazione del container
+        // Questo deve essere fatto SEMPRE, non solo quando carichiamo contenuto
+        textView.alignment = .center
+        
+        // Applica anche al textStorage se ha contenuto
+        if let storage = textView.textStorage, storage.length > 0 {
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = .center
+            storage.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: storage.length))
+        }
     }
     
     /// Calcola e notifica l'altezza del contenuto
+    /// NOTA: Ora chiamata sia in wrap mode che in editing mode per permettere l'auto-growth dinamico
     private func reportContentHeight(textView: NSTextView) {
-        guard shouldWrapText, let layoutManager = textView.layoutManager,
+        guard let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer else { return }
         
         // Forza il calcolo del layout
         layoutManager.ensureLayout(for: textContainer)
         
         let contentHeight = layoutManager.usedRect(for: textContainer).height
-        onContentHeightChanged?(contentHeight)
+        // Aggiungi padding per glyph descendents (g, y, j, p, q) che potrebbero essere tagliati
+        let paddedHeight = contentHeight + 4
+        onContentHeightChanged?(paddedHeight)
+    }
+    
+    /// Forza l'allineamento centrato su tutto il contenuto del textView
+    /// CRITICAL: Questa funzione deve essere chiamata dopo ogni caricamento di contenuto
+    /// perché il paragraphStyle dell'attributedString potrebbe sovrascrivere l'alignment
+    private func forceCenterAlignment(textView: NSTextView) {
+        guard let storage = textView.textStorage, storage.length > 0 else {
+            // Se non c'è contenuto, imposta almeno l'alignment della textView
+            textView.alignment = .center
+            return
+        }
+        
+        // Crea un nuovo paragraph style centrato
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .center
+        
+        // Applica a tutto il contenuto
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+        
+        // Imposta anche l'alignment della textView per coerenza
+        textView.alignment = .center
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
@@ -200,10 +243,13 @@ struct RichTextEditor: NSViewRepresentable {
         if let currentData = data,
            let attributedString = try? NSAttributedString(data: currentData, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil) {
             // Applica l'attributed string (include stili)
-            // Il confronto plain text non basta perché gli stili potrebbero cambiare
             textView.textStorage?.setAttributedString(attributedString)
+            
+            // CRITICAL FIX: Forza l'allineamento centrato dopo aver caricato il contenuto
+            forceCenterAlignment(textView: textView)
         } else if !plainText.isEmpty && textView.string != plainText {
             textView.string = plainText
+            forceCenterAlignment(textView: textView)
         }
         
         // Report altezza contenuto dopo l'aggiornamento
@@ -229,7 +275,15 @@ struct RichTextEditor: NSViewRepresentable {
             // 1. Aggiorna Plain Text
             parent.plainText = textView.string
             
-            // 2. Aggiorna Rich Data
+            // 2. Forza l'allineamento centrato PRIMA di salvare
+            // Questo garantisce che i dati salvati abbiano sempre l'allineamento centrato
+            if let textStorage = textView.textStorage, textStorage.length > 0 {
+                let paragraphStyle = NSMutableParagraphStyle()
+                paragraphStyle.alignment = .center
+                textStorage.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: textStorage.length))
+            }
+            
+            // 3. Aggiorna Rich Data (ora con allineamento centrato)
             if let textStorage = textView.textStorage {
                 let range = NSRange(location: 0, length: textStorage.length)
                 do {
@@ -240,12 +294,14 @@ struct RichTextEditor: NSViewRepresentable {
                 }
             }
             
-            // 3. Report altezza contenuto (per auto-height in manual mode)
-            if parent.shouldWrapText, let layoutManager = textView.layoutManager,
+            // 4. Report altezza contenuto (SEMPRE, per permettere auto-growth dinamico durante l'editing)
+            if let layoutManager = textView.layoutManager,
                let textContainer = textView.textContainer {
                 layoutManager.ensureLayout(for: textContainer)
                 let contentHeight = layoutManager.usedRect(for: textContainer).height
-                parent.onContentHeightChanged?(contentHeight)
+                // Aggiungi padding per glyph descendents (g, y, j, p, q) che potrebbero essere tagliati
+                let paddedHeight = contentHeight + 4
+                parent.onContentHeightChanged?(paddedHeight)
             }
         }
         
@@ -368,9 +424,12 @@ class FormattableTextView: NSTextView {
         centerVertically()
     }
     
-    /// Centra il testo sia orizzontalmente che verticalmente nella view.
-    /// Funziona correttamente sia in modalità auto (singola riga) che manuale (testo a capo).
-    /// Usa isUpdatingLayout per prevenire loop infiniti.
+    /// Centra il testo verticalmente nella view.
+    /// L'allineamento orizzontale è gestito da .center alignment.
+    /// 
+    /// SOLUZIONE: Su macOS, textContainerInset applica lo stesso valore simmetricamente
+    /// (top+bottom), quindi non può essere usato per il centering asimmetrico.
+    /// Invece, usiamo textContainerInset solo per il top offset calcolato dinamicamente.
     private func centerVertically() {
         // Previeni loop infiniti
         guard !isUpdatingLayout else { return }
@@ -381,37 +440,38 @@ class FormattableTextView: NSTextView {
         defer { isUpdatingLayout = false }
         
         // Forza il calcolo del layout per assicurarsi che usedRect sia accurato
-        // Questo è cruciale per il testo a capo (wrapped text)
         layoutManager.ensureLayout(for: container)
         
         // Ottieni le dimensioni della view e del contenuto
-        let viewWidth = self.bounds.width
         let viewHeight = self.bounds.height
         let usedRect = layoutManager.usedRect(for: container)
-        let contentWidth = usedRect.width
         let contentHeight = usedRect.height
         
-        var newWidthInset: CGFloat = 0
-        var newHeightInset: CGFloat = 0
+        // Calcola l'offset verticale per centrare il contenuto
+        // Se il contenuto è più alto della view, non applicare offset (0)
+        let verticalOffset = max(0, (viewHeight - contentHeight) / 2)
         
-        // Centra orizzontalmente se il contenuto è più stretto della view
-        if contentWidth < viewWidth && contentWidth > 0 && viewWidth > 0 {
-            let leftInset = (viewWidth - contentWidth) / 2.0
-            newWidthInset = max(0, floor(leftInset))
-        }
+        // Applica l'offset come inset top (usando textContainerInset.height come top inset)
+        // NOTA: Su macOS, textContainerInset.height viene applicato sia top che bottom,
+        // ma poiché stiamo lavorando con bounds e usedRect, possiamo usarlo come offset singolo
+        // se impostiamo la view per non espandersi verticalmente oltre i bounds del container.
         
-        // Centra verticalmente se il contenuto è più corto della view
-        if contentHeight < viewHeight && contentHeight > 0 && viewHeight > 0 {
-            let topInset = (viewHeight - contentHeight) / 2.0
-            newHeightInset = max(0, floor(topInset))
-        }
-        
-        let newInset = NSSize(width: newWidthInset, height: newHeightInset)
-        
-        // Evita update loop: aggiorna solo se c'è una differenza significativa
-        if abs(textContainerInset.width - newInset.width) > 0.5 ||
-           abs(textContainerInset.height - newInset.height) > 0.5 {
-            textContainerInset = newInset
+        // FIX: Usa un approccio diverso - modifica il frame.origin.y della textView
+        // all'interno del scroll view per ottenere il centering verticale.
+        if let scrollView = self.enclosingScrollView {
+            let clipHeight = scrollView.contentView.bounds.height
+            let newOffset = max(0, (clipHeight - contentHeight) / 2)
+            
+            // Solo aggiorna se il valore è significativamente diverso (evita micro-aggiustamenti)
+            let currentInset = textContainerInset.height
+            if abs(currentInset - newOffset) > 1 {
+                textContainerInset = NSSize(width: 0, height: newOffset)
+            }
+        } else {
+            // Fallback senza scroll view: usa direttamente l'offset calcolato
+            if abs(textContainerInset.height - verticalOffset) > 1 {
+                textContainerInset = NSSize(width: 0, height: verticalOffset)
+            }
         }
     }
     

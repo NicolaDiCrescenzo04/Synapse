@@ -62,7 +62,7 @@ final class SynapseNode {
     static let minWidth: Double = 60
     
     /// Altezza minima del nodo
-    static let minHeight: Double = 28
+    static let minHeight: Double = 22
     
     /// Larghezza di default per nuovi nodi
     static let defaultWidth: Double = 100
